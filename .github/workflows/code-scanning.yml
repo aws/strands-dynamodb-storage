@@ -1,0 +1,104 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Static analysis for both languages in this monorepo.
+#
+# Two layers, deliberately:
+#   1. CodeQL uploads SARIF to GitHub code scanning, so findings land in the
+#      Security tab and notify the repository. That is the alerting mechanism.
+#   2. Semgrep and Bandit fail the build directly, so scanning is enforced even
+#      where code scanning upload is unavailable, and on every pull request from
+#      a fork where SARIF upload is restricted.
+#
+# Findings must be fixed or explicitly suppressed with a justification comment.
+
+name: Code Scanning
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly, so a newly published rule finds existing code without waiting for a commit.
+    - cron: '17 4 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: code-scanning-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  codeql:
+    name: CodeQL (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [python, javascript-typescript]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          queries: security-extended
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: /language:${{ matrix.language }}
+
+  semgrep:
+    name: Semgrep
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Semgrep
+        run: pip install semgrep
+
+      # --error makes a finding fail the job. Covers Python and TypeScript in one pass.
+      - name: Scan
+        run: semgrep --config p/default --config p/security-audit --error --skip-unknown-extensions .
+
+  bandit:
+    name: Bandit (Python)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Bandit
+        run: pip install bandit
+
+      # Tests are excluded: assert statements there are the point, not a finding.
+      - name: Scan
+        run: bandit -r python/src -ll
+
+  dependency-review:
+    name: Dependency review
+    # Only meaningful on a pull request, where there is a base to diff against.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high

@@ -1,0 +1,53 @@
+name: CI - TypeScript
+
+on:
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'typescript/**'
+      - '.github/workflows/ci-typescript.yml'
+  push:
+    branches: [ main ]
+    paths:
+      - 'typescript/**'
+      - '.github/workflows/ci-typescript.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-typescript-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: typescript
+
+jobs:
+  check:
+    name: Type-check, unit tests, build (node ${{ matrix.node-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: ['20', '22']
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+          cache-dependency-path: typescript/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check (format + lint + type-check + unit tests)
+        run: npm run check
+
+      - name: Build
+        run: npm run build
