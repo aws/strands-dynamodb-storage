@@ -1,0 +1,72 @@
+name: Publish TypeScript to npm
+
+# Triggered when a GitHub Release is published with a tag prefixed `typescript-v`
+# (e.g. `typescript-v0.1.0`). The published version is whatever is currently in
+# typescript/package.json — bump it before tagging.
+on:
+  release:
+    types:
+      - published
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: typescript
+
+jobs:
+  check-tag:
+    name: Check tag is typescript-v*
+    runs-on: ubuntu-latest
+    outputs:
+      should_publish: ${{ steps.check.outputs.should_publish }}
+    steps:
+      - id: check
+        env:
+          TAG_NAME: ${{ github.event.release.tag_name }}
+        run: |
+          if [[ "$TAG_NAME" == typescript-v* ]]; then
+            echo "should_publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_publish=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  publish:
+    name: Publish to npm
+    needs: check-tag
+    if: needs.check-tag.outputs.should_publish == 'true'
+    runs-on: ubuntu-latest
+    # Create an `npm` environment in repo settings to gate publishes behind
+    # required reviewers, and scope the NPM_TOKEN secret to it.
+    environment:
+      name: npm
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+          cache: 'npm'
+          cache-dependency-path: typescript/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run checks
+        run: npm run check
+
+      - name: Build
+        run: npm run build
+
+      - name: Publish
+        run: npm publish --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

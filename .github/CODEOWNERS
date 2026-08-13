@@ -1,0 +1,6 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Every change requires review from a maintainer. Branch protection on main is
+# configured to require CODEOWNERS review, so this file is what enforces it.
+* @LeeroyHannigan

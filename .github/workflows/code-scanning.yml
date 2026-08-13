@@ -1,0 +1,109 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Static analysis for both languages in this monorepo.
+#
+# Two layers, deliberately:
+#   1. CodeQL uploads SARIF to GitHub code scanning, so findings land in the
+#      Security tab and notify the repository. That is the alerting mechanism.
+#   2. Semgrep and Bandit fail the build directly, so scanning is enforced even
+#      where code scanning upload is unavailable, and on every pull request from
+#      a fork where SARIF upload is restricted.
+#
+# Findings must be fixed or explicitly suppressed with a justification comment.
+
+name: Code Scanning
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly, so a newly published rule finds existing code without waiting for a commit.
+    - cron: '17 4 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: code-scanning-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  codeql:
+    name: CodeQL (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+      # CodeQL reads workflow run metadata to attach results to the run; on a
+      # private repository this is not covered by the default token scopes and
+      # its absence fails the analyze step with "Resource not accessible by
+      # integration" after the SARIF has already been produced.
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [python, javascript-typescript]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@f3712979fa5f215279b101dd0a2e3bdfb4353324 # v3.37.7
+        with:
+          languages: ${{ matrix.language }}
+          queries: security-extended
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@f3712979fa5f215279b101dd0a2e3bdfb4353324 # v3.37.7
+        with:
+          category: /language:${{ matrix.language }}
+
+  semgrep:
+    name: Semgrep
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.12'
+
+      - name: Install Semgrep
+        run: pip install semgrep
+
+      # --error makes a finding fail the job. Covers Python and TypeScript in one pass.
+      - name: Scan
+        run: semgrep --config p/default --config p/security-audit --error --skip-unknown-extensions .
+
+  bandit:
+    name: Bandit (Python)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.12'
+
+      - name: Install Bandit
+        run: pip install bandit
+
+      # Tests are excluded: assert statements there are the point, not a finding.
+      - name: Scan
+        run: bandit -r python/src -ll
+
+  dependency-review:
+    name: Dependency review
+    # Only meaningful on a pull request, where there is a base to diff against.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/dependency-review-action@2031cfc080254a8a887f58cffee85186f0e49e48 # v4.9.0
+        with:
+          fail-on-severity: high

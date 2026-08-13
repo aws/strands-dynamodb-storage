@@ -1,0 +1,87 @@
+{
+  "name": "strands-dynamodb-storage",
+  "version": "0.1.0",
+  "description": "Amazon DynamoDB storage backend for the Strands Agents SDK \u2014 one Storage implementation for Session Manager, Memory Manager, and any subsystem, with optional S3 offload for large values and an optional native vector-search hook.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "!dist/**/*.test.*",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "type-check": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:integ": "vitest run -c vitest.integ.config.ts",
+    "lint": "eslint src test",
+    "lint:fix": "eslint src test --fix",
+    "format": "prettier --write src test",
+    "format:check": "prettier --check src test",
+    "check": "npm run format:check && npm run lint && npm run type-check && npm run test",
+    "prepack": "npm run build"
+  },
+  "keywords": [
+    "strands",
+    "strands-agents",
+    "dynamodb",
+    "storage",
+    "agent",
+    "memory",
+    "session",
+    "aws"
+  ],
+  "author": "Amazon Web Services",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aws/strands-dynamodb-storage.git"
+  },
+  "bugs": {
+    "url": "https://github.com/aws/strands-dynamodb-storage/issues"
+  },
+  "homepage": "https://github.com/aws/strands-dynamodb-storage#readme",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "peerDependencies": {
+    "@aws-sdk/client-dynamodb": "^3.1103.0",
+    "@aws-sdk/client-s3": "^3.0.0",
+    "@aws-sdk/lib-dynamodb": "^3.1103.0",
+    "@aws-sdk/util-dynamodb": "^3.996.7",
+    "@strands-agents/sdk": ">=1.10.0"
+  },
+  "peerDependenciesMeta": {
+    "@aws-sdk/client-s3": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@aws-sdk/client-dynamodb": "^3.1104.0",
+    "@aws-sdk/client-s3": "^3.1092.0",
+    "@aws-sdk/client-sts": "^3.1092.0",
+    "@aws-sdk/lib-dynamodb": "^3.1104.0",
+    "@aws-sdk/util-dynamodb": "^3.996.7",
+    "@eslint/js": "^9.0.0",
+    "@strands-agents/sdk": "^1.10.0",
+    "@types/node": "^22.0.0",
+    "@typescript-eslint/eslint-plugin": "^8.0.0",
+    "@typescript-eslint/parser": "^8.0.0",
+    "@vitest/coverage-v8": "^2.1.9",
+    "eslint": "^9.0.0",
+    "globals": "^17.7.0",
+    "prettier": "^3.0.0",
+    "typescript": "^5.5.0",
+    "vitest": "^2.0.0"
+  }
+}
