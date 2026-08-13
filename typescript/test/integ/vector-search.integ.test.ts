@@ -66,34 +66,30 @@ describe.skipIf(!RUN)('DynamoDBStorage — native vector search (live)', () => {
     await client.send(new DeleteTableCommand({ TableName: TABLE }))
   })
 
-  it(
-    'searches natively end to end',
-    async () => {
-      const storage = new DynamoDBStorage(TABLE, { region: REGION, prefix: 'tenant/a/', indexName: INDEX })
-      await storage.write('memories/m1', new TextEncoder().encode('likes window seats'), {
-        vector: [1, 0, 0, 0],
-        metadata: { kind: 'pref' },
-      })
-      await storage.write('memories/m2', new TextEncoder().encode('allergic to peanuts'), {
-        vector: [0, 1, 0, 0],
-      })
+  it('searches natively end to end', async () => {
+    const storage = new DynamoDBStorage(TABLE, { region: REGION, prefix: 'tenant/a/', indexName: INDEX })
+    await storage.write('memories/m1', new TextEncoder().encode('likes window seats'), {
+      vector: [1, 0, 0, 0],
+      metadata: { kind: 'pref' },
+    })
+    await storage.write('memories/m2', new TextEncoder().encode('allergic to peanuts'), {
+      vector: [0, 1, 0, 0],
+    })
 
-      // Eventually consistent: poll until both items are visible to search.
-      const deadline = Date.now() + 300_000
-      let results: SearchResult[] = []
-      for (;;) {
-        results = await storage.search({ vector: [1, 0, 0, 0], topK: 2, pk: 'tenant/a' })
-        if (results.length === 2) break
-        if (Date.now() > deadline) throw new Error('expected both items in search results within 300s')
-        await sleep(5000)
-      }
-      expect(results[0]?.key).toBe('memories/m1') // nearest first
-      expect(results[0]?.metadata).toEqual({ kind: 'pref' })
-      expect(results[0]!.score).toBeLessThanOrEqual(results[1]!.score) // COSINE distance
+    // Eventually consistent: poll until both items are visible to search.
+    const deadline = Date.now() + 300_000
+    let results: SearchResult[] = []
+    for (;;) {
+      results = await storage.search({ vector: [1, 0, 0, 0], topK: 2, pk: 'tenant/a' })
+      if (results.length === 2) break
+      if (Date.now() > deadline) throw new Error('expected both items in search results within 300s')
+      await sleep(5000)
+    }
+    expect(results[0]?.key).toBe('memories/m1') // nearest first
+    expect(results[0]?.metadata).toEqual({ kind: 'pref' })
+    expect(results[0]!.score).toBeLessThanOrEqual(results[1]!.score) // COSINE distance
 
-      const [top] = await storage.search({ vector: [1, 0, 0, 0], topK: 1, pk: 'tenant/a', includeValues: true })
-      expect(new TextDecoder().decode(top?.data)).toBe('likes window seats')
-    },
-    360_000
-  )
+    const [top] = await storage.search({ vector: [1, 0, 0, 0], topK: 1, pk: 'tenant/a', includeValues: true })
+    expect(new TextDecoder().decode(top?.data)).toBe('likes window seats')
+  }, 360_000)
 })

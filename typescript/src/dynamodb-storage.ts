@@ -452,7 +452,9 @@ export class DynamoDBStorage implements Storage<string | DynamoDBListQuery> {
       throw new StorageError(`topK must be between 1 and ${MAX_TOP_K} (SearchVectors TopK limit); got ${query.topK}`)
     }
     if (!query.vector.every((v) => Number.isFinite(v))) {
-      throw new StorageError('Query vector contains non-finite values (NaN/Infinity); the DynamoDB N type rejects them.')
+      throw new StorageError(
+        'Query vector contains non-finite values (NaN/Infinity); the DynamoDB N type rejects them.'
+      )
     }
     const topK = query.filter !== undefined ? Math.min(query.topK * FILTER_OVERFETCH, MAX_TOP_K) : query.topK
 

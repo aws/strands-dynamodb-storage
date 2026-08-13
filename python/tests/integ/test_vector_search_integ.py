@@ -52,9 +52,7 @@ def vector_table():
             {
                 "IndexName": INDEX,
                 "VectorAttribute": {"AttributeName": "vector"},
-                "SearchSchema": [
-                    {"AttributeName": "pk", "SearchSchemaElementType": "HASH"}
-                ],
+                "SearchSchema": [{"AttributeName": "pk", "SearchSchemaElementType": "HASH"}],
                 "Projection": {"ProjectionType": "ALL"},
                 "Dimensions": 4,
                 "DistanceFunction": "COSINE",
@@ -95,7 +93,5 @@ async def test_native_search_end_to_end(vector_table):
     assert results[0].score <= results[1].score  # COSINE distance: lower is closer
 
     # include_values round-trips the stored bytes
-    [top] = await storage.search(
-        SearchQuery(vector=[1.0, 0.0, 0.0, 0.0], top_k=1, pk="tenant/a", include_values=True)
-    )
+    [top] = await storage.search(SearchQuery(vector=[1.0, 0.0, 0.0, 0.0], top_k=1, pk="tenant/a", include_values=True))
     assert top.data == b"likes window seats"
