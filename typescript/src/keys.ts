@@ -8,8 +8,8 @@ import { StorageError } from '@strands-agents/sdk'
  * and trailing `/`, and rejects empty keys and any `..` segment.
  *
  * Behaviourally identical to the Strands SDK's internal key normalization, which
- * is not part of the public API surface. Reimplemented here so this community
- * backend does not depend on unexported SDK internals while still producing keys
+ * is not part of the public API surface. Reimplemented here so this package does
+ * not depend on unexported SDK internals while still producing keys
  * that are byte-for-byte consistent with the shipped `Storage` implementations.
  *
  * @param key - The raw key to normalize

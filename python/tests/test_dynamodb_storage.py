@@ -529,7 +529,7 @@ def test_namespace_forwards_session_and_config():
 async def test_cross_tenant_isolation(aws):
     # Two tenants scoped by a constructor-bound prefix. The same logical key must
     # resolve to physically distinct partitions, and neither tenant can read or list
-    # into the other's data — the isolation guarantee reviewed by AppSec.
+    # into the other's data, which is the isolation guarantee this backend must hold.
     a = make(aws, prefix="tenant-a")
     b = make(aws, prefix="tenant-b")
     await a.write("sessions/s1/secret", b"a-data")

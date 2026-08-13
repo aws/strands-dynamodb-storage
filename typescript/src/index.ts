@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * Community DynamoDB {@link https://www.npmjs.com/package/@strands-agents/sdk | Strands Agents}
+ * Amazon DynamoDB {@link https://www.npmjs.com/package/@strands-agents/sdk | Strands Agents}
  * storage backend.
  *
  * Implements the SDK's unified `Storage` interface so a single `DynamoDBStorage`

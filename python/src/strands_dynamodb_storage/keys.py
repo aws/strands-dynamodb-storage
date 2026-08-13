@@ -5,7 +5,7 @@
 
 Behaviourally identical to the Strands SDK's internal ``_normalize_key`` /
 ``_normalize_prefix`` (which are not part of the public API), reimplemented here so
-this community backend does not depend on unexported SDK internals while producing
+this package does not depend on unexported SDK internals while producing
 keys that are byte-for-byte consistent with the shipped ``Storage`` implementations.
 """
 

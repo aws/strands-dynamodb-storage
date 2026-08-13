@@ -1,6 +1,6 @@
 # strands-dynamodb-storage
 
-A community **Amazon DynamoDB `Storage` backend** for the [Strands Agents](https://github.com/strands-agents/harness-sdk) TypeScript SDK.
+An **Amazon DynamoDB `Storage` backend** for the [Strands Agents](https://github.com/strands-agents/harness-sdk) TypeScript SDK.
 
 It implements the SDK's unified byte `Storage` interface (`write` / `read` / `delete` / `list` / `namespace`), so one
 DynamoDB-backed instance can be passed to **Session Manager, Memory Manager**, the context offloader, transcripts, and
