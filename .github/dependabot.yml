@@ -88,8 +88,11 @@ updates:
           - 'patch'
       # Major production updates aren't matched by any group, so they get
       # individual PRs — gated by the 30-day semver-major cooldown above.
-  # GitHub Actions workflow pins. Low volume, so no grouping; the cooldown
-  # still holds majors back for review before the bump PR opens.
+  # GitHub Actions workflow pins. Low volume, so no grouping. Actions are
+  # pinned to commit SHAs, and the github-actions ecosystem does not support the
+  # semver-scoped cooldown keys the package ecosystems use above (a SHA carries
+  # no semver, so Dependabot rejects them), leaving default-days as the only
+  # cooldown available here.
   - package-ecosystem: 'github-actions'
     directory: '/'
     schedule:
@@ -99,6 +102,3 @@ updates:
       prefix: ci
     cooldown:
       default-days: 7
-      semver-major-days: 30
-      semver-minor-days: 7
-      semver-patch-days: 3
