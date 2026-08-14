@@ -19,10 +19,10 @@ from strands.session import SnapshotSessionManager
 from strands_dynamodb_storage import DynamoDBStorage
 
 storage = DynamoDBStorage("agent-data", region_name="us-east-1")
-agent = Agent(session_manager=SnapshotSessionManager("s1", storage=storage))
+agent = Agent(session_manager=SnapshotSessionManager(storage=storage))
 ```
 
-The same instance backs any subsystem that accepts a `Storage` — for example, offloading oversized
+The same instance backs any subsystem that accepts a `Storage`, for example offloading oversized
 tool results with the context offloader:
 
 ```python
