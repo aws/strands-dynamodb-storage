@@ -38,7 +38,9 @@ jobs:
     if: needs.check-tag.outputs.should_publish == 'true'
     runs-on: ubuntu-latest
     # Create an `npm` environment in repo settings to gate publishes behind
-    # required reviewers, and scope the NPM_TOKEN secret to it.
+    # required reviewers. Publishing uses npm trusted publishing (OIDC): register
+    # this repository + workflow + environment as a trusted publisher on the
+    # npm package settings. No token is stored anywhere.
     environment:
       name: npm
     permissions:
@@ -54,8 +56,10 @@ jobs:
         with:
           node-version: '22'
           registry-url: 'https://registry.npmjs.org'
-          cache: 'npm'
-          cache-dependency-path: typescript/package-lock.json
+
+      # Node 22 bundles npm 10, but OIDC trusted publishing needs npm >= 11.5.1.
+      - name: Upgrade npm for trusted publishing
+        run: npm install -g npm@latest && npm --version
 
       - name: Install dependencies
         run: npm ci
@@ -66,7 +70,7 @@ jobs:
       - name: Build
         run: npm run build
 
+      # Authenticates via the OIDC token exchange (id-token: write), which also
+      # generates and uploads the provenance attestation. No NODE_AUTH_TOKEN.
       - name: Publish
         run: npm publish --access public --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
