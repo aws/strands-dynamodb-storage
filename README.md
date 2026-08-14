@@ -5,7 +5,7 @@
     </a>
     &nbsp;&nbsp;&nbsp;
     <a href="https://strandsagents.com">
-      <img src="https://strandsagents.com/latest/assets/logo-github.svg" alt="Strands Agents" width="41" height="78">
+      <img src=".github/assets/strands.svg" alt="Strands Agents" width="41" height="78">
     </a>
   </p>
 
