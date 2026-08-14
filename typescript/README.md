@@ -53,6 +53,12 @@ const bytes = await store.read('sessions/s1/snapshot.json')   // Uint8Array | nu
 // list by string prefix -> a native partition Query with begins_with
 const keys = await store.list('sessions/s1/')
 
+// Note: prefixes must cover at least a full scope and identifier ('scope/id/').
+// list('') and single-segment prefixes are rejected as too broad -- they would
+// require a cross-partition Scan. This deliberately narrows the SDK Storage
+// contract (whose in-memory backends list everything on ''); SDK subsystems
+// always pass namespaced prefixes and are unaffected.
+
 // or a structured DynamoDB query (the intended pk/sk extension point) — no GSI
 const scoped = await store.list({ pk: 'sessions/s1', skPrefix: 'scopes/agent/' })
 
@@ -128,12 +134,13 @@ await store.write('memory/u1/m1', new TextEncoder().encode('likes window seats')
 const results = await store.search({
   vector: queryEmbedding,
   topK: 5,
-  pk: 'memory/u1',          // required: the index HASH key
+  pk: 'memory/u1',          // required when the index declares a HASH element
   filter: { kind: 'preference' },   // optional server-side metadata filter
   includeValues: true,      // hydrate each match's stored bytes
 })
 // results: Array<{ key: string; score: number; data?: Uint8Array; metadata?: Record<string, unknown> }>
-// ordered nearest-first; score is higher = nearer.
+// ordered nearest-first; score direction follows the index's distance function
+// (COSINE/EUCLIDEAN: lower = nearer; DOT_PRODUCT: higher = more similar).
 ```
 
 ### The `vectorSearch` adapter (optional override)
@@ -154,8 +161,7 @@ type VectorSearchAdapter = (params: {
 }) => Promise<Array<{ key: string; score: number; metadata?: Record<string, unknown> }>>
 ```
 
-At GA this becomes a ~10-line wrapper over `SearchVectorsCommand`. Until then, provide your own adapter (or use the
-reference recipe) — without one, `search()` throws a clear error instead of silently degrading.
+The adapter is purely an override: with none configured, `search()` issues the native `SearchVectorsCommand` itself.
 
 ## Configuration reference
 

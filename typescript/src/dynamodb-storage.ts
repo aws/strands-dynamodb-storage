@@ -45,7 +45,7 @@ export interface SearchQuery {
   vector: number[]
   /** Number of nearest neighbours to return. */
   topK: number
-  /** Optional partition/scope to search within. */
+  /** Partition/scope to search within. Required when the index's SearchSchema declares a HASH element; omit otherwise. */
   pk?: string
   /** Optional metadata pre-filter (equality). */
   filter?: Record<string, string | number | boolean>
@@ -57,7 +57,7 @@ export interface SearchQuery {
 export interface SearchResult {
   /** Storage key of the matched item (with any constructor prefix stripped). */
   key: string
-  /** Similarity score (backend-defined; higher is nearer for cosine/dot). */
+  /** Raw index score; direction depends on the index's distance function: lower is nearer for COSINE/EUCLIDEAN, higher for DOT_PRODUCT. */
   score: number
   /** Stored bytes, present only when `includeValues` was requested. */
   data?: Uint8Array
@@ -111,6 +111,7 @@ export interface DynamoDBStorageConfig {
    * TTL reaps it, and `read`/`list` filter out items whose expiry has already passed —
    * covering the up-to-~48h lag before DynamoDB physically deletes them. A per-write
    * `ttlSeconds` tunes the duration for that write.
+   * On an instance that did not opt in here, a per-write `ttlSeconds` is ignored.
    *
    * Physical cleanup requires TTL enabled on that attribute at the table level. When
    * combined with S3 offload, expiry removes only the DynamoDB pointer item — configure
@@ -123,7 +124,7 @@ export interface DynamoDBStorageConfig {
   indexName?: string
   /** Item attribute holding the embedding vector. Default `'vector'`. */
   vectorAttribute?: string
-  /** Adapter that performs the native vector search. Required to use `search()` until GA. */
+  /** Optional override of the native `SearchVectors` call (testing, custom routing). When unset, `search()` calls DynamoDB natively. */
   vectorSearch?: VectorSearchAdapter
 }
 
@@ -258,7 +259,23 @@ export class DynamoDBStorage implements Storage<string | DynamoDBListQuery> {
         await this._s3Put(full, payload)
         await this._put({ [PK]: pk, [SK]: sk, [KEY_ATTR]: full, [S3_ATTR]: true, ...extra })
       } else {
-        await this._put({ [PK]: pk, [SK]: sk, [KEY_ATTR]: full, [DATA_ATTR]: payload, ...extra })
+        // An overwrite can shrink a previously offloaded value back inline. Ask for
+        // the replaced item so the now-unreferenced S3 object can be reclaimed: the
+        // new item carries no s3 flag, so without this the object is orphaned
+        // forever (a later delete() never reaches it).
+        const old = await this._put(
+          { [PK]: pk, [SK]: sk, [KEY_ATTR]: full, [DATA_ATTR]: payload, ...extra },
+          { returnOld: Boolean(this._s3Bucket) }
+        )
+        if (old?.[S3_ATTR]) {
+          try {
+            await this._s3Delete(full)
+          } catch {
+            // Best-effort: the write itself is durable, so a failed cleanup must
+            // not fail it. An S3 lifecycle rule is the backstop for missed
+            // reclamations.
+          }
+        }
       }
     } catch (error: unknown) {
       if (error instanceof StorageError) throw error
@@ -639,10 +656,20 @@ export class DynamoDBStorage implements Storage<string | DynamoDBListQuery> {
     return keys.sort()
   }
 
-  private async _put(item: Record<string, unknown>): Promise<void> {
+  private async _put(
+    item: Record<string, unknown>,
+    options?: { returnOld?: boolean }
+  ): Promise<Record<string, unknown> | undefined> {
     const { PutCommand } = await import('@aws-sdk/lib-dynamodb')
     const client = await this._getClient()
-    await client.send(new PutCommand({ TableName: this._tableName, Item: item }))
+    const response = await client.send(
+      new PutCommand({
+        TableName: this._tableName,
+        Item: item,
+        ...(options?.returnOld ? { ReturnValues: 'ALL_OLD' as const } : {}),
+      })
+    )
+    return response.Attributes
   }
 
   private async _getClient(): Promise<import('@aws-sdk/lib-dynamodb').DynamoDBDocumentClient> {
