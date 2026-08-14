@@ -29,6 +29,11 @@ store = DynamoDBStorage("agent-data", region_name="us-east-1")
 await store.write("sessions/s1/snapshot.json", b'{"turn": 1}')
 data = await store.read("sessions/s1/snapshot.json")           # bytes | None
 keys = await store.list("sessions/s1/")                         # native Query
+# Note: prefixes must cover at least a full scope and identifier ("scope/id/").
+# list("") and single-segment prefixes are rejected as too broad -- they would
+# require a cross-partition Scan. This deliberately narrows the SDK Storage
+# contract (whose in-memory backends list everything on ""); SDK subsystems
+# always pass namespaced prefixes and are unaffected.
 scoped = await store.list(DynamoDBListQuery(pk="sessions/s1", sk_prefix="scopes/"))
 await store.delete("sessions/s1/snapshot.json")
 ```

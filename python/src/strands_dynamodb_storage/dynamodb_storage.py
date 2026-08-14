@@ -172,10 +172,14 @@ class DynamoDBStorage:
             client: Pre-configured low-level DynamoDB client.
             prefix: Key prefix prepended to every key (a namespace within the table).
             s3_bucket: Bucket for offloading values above the item-size limit.
+                If DynamoDB TTL reaps an offloaded item, only the pointer item is
+                removed; configure an S3 lifecycle rule to reap orphaned objects.
             s3_prefix: Key prefix for offloaded S3 objects.
             s3_client: Pre-configured S3 client. Ignored unless ``s3_bucket`` is set.
             compression: ``"gzip"`` for transparent compression, or ``"none"``.
-            ttl_seconds: Default TTL. Setting it opts in to TTL (stamp + read/list filter).
+            ttl_seconds: Default TTL. Setting it opts in to TTL (stamp + read/list
+                filter). A per-write ``ttl_seconds`` override applies only when the
+                instance opted in here.
             ttl_attribute: Item attribute holding the epoch-seconds TTL.
             index_name: Vector index name (for ``search``).
             vector_attribute: Item attribute holding the embedding vector.
@@ -259,9 +263,22 @@ class DynamoDBStorage:
                     )
                 await self._s3_put(full, payload)
                 item = {_PK: {"S": pk}, _SK: {"S": sk}, _KEY_ATTR: {"S": full}, _S3_ATTR: {"BOOL": True}, **extra}
+                await self._put(item)
             else:
                 item = {_PK: {"S": pk}, _SK: {"S": sk}, _KEY_ATTR: {"S": full}, _DATA_ATTR: {"B": payload}, **extra}
-            await self._put(item)
+                # An overwrite can shrink a previously offloaded value back inline.
+                # Ask for the replaced item so the now-unreferenced S3 object can be
+                # reclaimed: the new item carries no s3 flag, so without this the
+                # object is orphaned forever (a later delete() never reaches it).
+                old = await self._put(item, return_old=bool(self._s3_bucket))
+                if old.get(_S3_ATTR, {}).get("BOOL"):
+                    try:
+                        await self._s3_delete(full)
+                    except Exception:  # noqa: BLE001
+                        # Best-effort: the write itself is durable, so a failed
+                        # cleanup must not fail it. An S3 lifecycle rule is the
+                        # backstop for missed reclamations.
+                        pass
         except StorageError:
             raise
         except Exception as error:
@@ -630,9 +647,14 @@ class DynamoDBStorage:
                 break
         return sorted(keys)
 
-    async def _put(self, item: dict[str, Any]) -> None:
+    async def _put(self, item: dict[str, Any], *, return_old: bool = False) -> dict[str, Any]:
         client = self._get_client()
-        await asyncio.to_thread(client.put_item, TableName=self._table_name, Item=item)
+        kwargs: dict[str, Any] = {"TableName": self._table_name, "Item": item}
+        if return_old:
+            kwargs["ReturnValues"] = "ALL_OLD"
+        response = await asyncio.to_thread(client.put_item, **kwargs)
+        attributes: dict[str, Any] = response.get("Attributes", {})
+        return attributes
 
     def _s3_key(self, full_key: str) -> str:
         return f"{self._s3_prefix}{full_key}"

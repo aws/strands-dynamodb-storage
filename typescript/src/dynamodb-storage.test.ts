@@ -45,8 +45,10 @@ class FakeDocumentClient {
       return { SearchResults: scored }
     }
     if (command instanceof PutCommand) {
-      this.items.set(this._k(input.Item.pk, input.Item.sk), input.Item)
-      return {}
+      const key = this._k(input.Item.pk, input.Item.sk)
+      const old = this.items.get(key)
+      this.items.set(key, input.Item)
+      return input.ReturnValues === 'ALL_OLD' && old ? { Attributes: old } : {}
     }
     if (command instanceof GetCommand) {
       return { Item: this.items.get(this._k(input.Key.pk, input.Key.sk)) }
@@ -284,6 +286,48 @@ describe('DynamoDBStorage — S3 offload', () => {
     await storage.delete('sessions/s1/big')
     expect(s3.objects.size).toBe(0)
     expect(await storage.read('sessions/s1/big')).toBeNull()
+  })
+
+  it('shrink-overwrite reclaims the offloaded S3 object', async () => {
+    const { storage, s3, client } = newStorage({ s3: true })
+    await storage.write('sessions/s1/doc', bytes('Z'.repeat(400_001)))
+    expect(s3.objects.size).toBe(1)
+    await storage.write('sessions/s1/doc', bytes('small now'))
+    const item = [...client.items.values()][0]!
+    expect(item.s3).toBeUndefined()
+    expect(s3.objects.size).toBe(0) // reclaimed, not orphaned
+    expect(str(await storage.read('sessions/s1/doc'))).toBe('small now')
+  })
+
+  it('inline-overwrite never touches S3 (negative control)', async () => {
+    const { storage, s3 } = newStorage({ s3: true })
+    const sends: unknown[] = []
+    const realSend = s3.send.bind(s3)
+    s3.send = async (c: any) => (sends.push(c), realSend(c))
+    await storage.write('sessions/s1/doc', bytes('one'))
+    await storage.write('sessions/s1/doc', bytes('two'))
+    expect(sends).toHaveLength(0)
+    expect(str(await storage.read('sessions/s1/doc'))).toBe('two')
+  })
+
+  it('offloaded-overwrite keeps the object readable (deterministic key reuse)', async () => {
+    const { storage, s3 } = newStorage({ s3: true })
+    await storage.write('sessions/s1/doc', bytes('A'.repeat(400_001)))
+    await storage.write('sessions/s1/doc', bytes('B'.repeat(400_002)))
+    expect(s3.objects.size).toBe(1)
+    expect(str(await storage.read('sessions/s1/doc'))).toBe('B'.repeat(400_002))
+  })
+
+  it('a failed S3 reclamation does not fail the write (best-effort)', async () => {
+    const { storage, s3 } = newStorage({ s3: true })
+    await storage.write('sessions/s1/doc', bytes('Z'.repeat(400_001)))
+    const realSend = s3.send.bind(s3)
+    s3.send = async (c: any) => {
+      if (c instanceof DeleteObjectCommand) throw new Error('s3 down')
+      return realSend(c)
+    }
+    await storage.write('sessions/s1/doc', bytes('small now')) // must not throw
+    expect(str(await storage.read('sessions/s1/doc'))).toBe('small now')
   })
 
   it('throws on an oversized value when no S3 bucket is configured', async () => {

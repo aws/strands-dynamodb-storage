@@ -199,6 +199,50 @@ async def test_small_value_inline(aws):
     assert await s.read("sessions/s1/small") == b"tiny"
 
 
+async def test_shrink_overwrite_reclaims_offloaded_s3_object(aws):
+    """Offloaded -> inline overwrite must delete the now-unreferenced S3 object."""
+    ddb, s3 = aws
+    s = make(aws, s3_bucket=BUCKET)
+    await s.write("sessions/s1/doc", b"Z" * 400_001)
+    assert s3_exists(s3, "sessions/s1/doc")
+    await s.write("sessions/s1/doc", b"small now")
+    item = raw_item(ddb, "sessions/s1/doc")
+    assert "s3" not in item and item["data"]["B"] == b"small now"
+    assert not s3_exists(s3, "sessions/s1/doc")  # reclaimed, not orphaned
+    assert await s.read("sessions/s1/doc") == b"small now"
+    await s.delete("sessions/s1/doc")  # still clean end-to-end
+
+
+async def test_inline_overwrite_never_touches_s3(aws):
+    """Negative control: inline -> inline overwrite must not attempt S3 cleanup."""
+    s = make(aws, s3_bucket=BUCKET)
+    await s.write("sessions/s1/doc", b"one")
+    with mock.patch.object(s, "_s3_delete", wraps=s._s3_delete) as spy:
+        await s.write("sessions/s1/doc", b"two")
+        spy.assert_not_called()
+    assert await s.read("sessions/s1/doc") == b"two"
+
+
+async def test_offloaded_overwrite_keeps_object_readable(aws):
+    """Offloaded -> offloaded overwrite reuses the deterministic object key."""
+    _, s3 = aws
+    s = make(aws, s3_bucket=BUCKET)
+    await s.write("sessions/s1/doc", b"A" * 400_001)
+    await s.write("sessions/s1/doc", b"B" * 400_002)
+    assert s3_exists(s3, "sessions/s1/doc")
+    assert await s.read("sessions/s1/doc") == b"B" * 400_002
+
+
+async def test_s3_cleanup_failure_does_not_fail_the_write(aws):
+    """The shrink-overwrite reclamation is best-effort: the write must survive it."""
+    _, s3 = aws
+    s = make(aws, s3_bucket=BUCKET)
+    await s.write("sessions/s1/doc", b"Z" * 400_001)
+    with mock.patch.object(s, "_s3_delete", side_effect=RuntimeError("s3 down")):
+        await s.write("sessions/s1/doc", b"small now")  # must not raise
+    assert await s.read("sessions/s1/doc") == b"small now"
+
+
 # ------------------------------------------------------------------- compression
 
 
