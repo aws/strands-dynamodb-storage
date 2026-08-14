@@ -129,6 +129,9 @@ export interface DynamoDBStorageConfig {
 }
 
 /** Attribute names for the single-table layout. */
+/** User-Agent marker attributing this package's AWS traffic (self-built clients only). */
+const USER_AGENT_MARKER = 'strands-dynamodb-storage'
+
 const PK = 'pk'
 const SK = 'sk'
 const KEY_ATTR = 'k'
@@ -676,7 +679,13 @@ export class DynamoDBStorage implements Storage<string | DynamoDBListQuery> {
     if (this._client) return this._client
     const { DynamoDBClient } = await import('@aws-sdk/client-dynamodb')
     const { DynamoDBDocumentClient } = await import('@aws-sdk/lib-dynamodb')
-    const base = new DynamoDBClient(this._region ? { region: this._region } : {})
+    // Attribute this package's traffic in the User-Agent, mirroring the Python
+    // package's user_agent_extra. Injected clients are consumer-owned and are
+    // deliberately left untouched.
+    const base = new DynamoDBClient({
+      ...(this._region ? { region: this._region } : {}),
+      customUserAgent: USER_AGENT_MARKER,
+    })
     this._client = DynamoDBDocumentClient.from(base)
     return this._client
   }
@@ -688,7 +697,10 @@ export class DynamoDBStorage implements Storage<string | DynamoDBListQuery> {
   private async _getS3Client(): Promise<import('@aws-sdk/client-s3').S3Client> {
     if (this._s3Client) return this._s3Client
     const { S3Client } = await import('@aws-sdk/client-s3')
-    this._s3Client = new S3Client(this._region ? { region: this._region } : {})
+    this._s3Client = new S3Client({
+      ...(this._region ? { region: this._region } : {}),
+      customUserAgent: USER_AGENT_MARKER,
+    })
     return this._s3Client
   }
 
