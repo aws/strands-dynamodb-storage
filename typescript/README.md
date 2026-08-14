@@ -43,6 +43,16 @@ const agent = new Agent({ sessionManager: new SessionManager({ storage }) })
 // sessions now persist to DynamoDB — nothing else to wire.
 ```
 
+The same instance backs any subsystem that accepts a `Storage` — for example, offloading oversized
+tool results with the context offloader:
+
+```ts
+import { Agent } from '@strands-agents/sdk'
+import { ContextOffloader } from '@strands-agents/sdk/vended-plugins/context-offloader'
+
+const agent = new Agent({ plugins: [new ContextOffloader({ storage })] })
+```
+
 ## Direct byte usage
 
 ```ts

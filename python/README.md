@@ -15,11 +15,21 @@ pip install strands-dynamodb-storage
 
 ```python
 from strands import Agent
-from strands.session import SessionManager
+from strands.session import SnapshotSessionManager
 from strands_dynamodb_storage import DynamoDBStorage
 
 storage = DynamoDBStorage("agent-data", region_name="us-east-1")
-agent = Agent(session_manager=SessionManager(storage=storage))
+agent = Agent(session_manager=SnapshotSessionManager("s1", storage=storage))
+```
+
+The same instance backs any subsystem that accepts a `Storage` — for example, offloading oversized
+tool results with the context offloader:
+
+```python
+from strands import Agent
+from strands.vended_plugins.context_offloader import ContextOffloader
+
+agent = Agent(plugins=[ContextOffloader(storage=storage)])
 ```
 
 Direct byte usage (async):
