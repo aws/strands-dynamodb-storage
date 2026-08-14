@@ -61,6 +61,43 @@ Agents are bursty, stateful, and ephemeral, which is precisely the workload shap
 
 Create a table with a string partition key `pk` and a string sort key `sk`, then point the storage at it. AWS credentials are resolved through the standard SDK chain.
 
+### One store for the whole agent
+
+Set `storage` once on the `Agent` and every subsystem that accepts a `Storage` — session persistence, the context offloader — uses it, each namespaced under its own prefix (`session/`, `offloader/`). Storage passed directly to a subsystem still takes precedence. Agent-level storage is a shared backend, not a switch: session state persists only once you add a session manager, which then inherits the store.
+
+```python
+from strands import Agent
+from strands.session import SnapshotSessionManager
+from strands.vended_plugins.context_offloader import ContextOffloader
+from strands_dynamodb_storage import DynamoDBStorage
+
+storage = DynamoDBStorage("agent-storage", region_name="us-east-1")
+
+# One backend for the whole agent — subsystems without their own storage inherit it.
+agent = Agent(
+    storage=storage,
+    session_manager=SnapshotSessionManager(),  # persists under session/
+    plugins=[ContextOffloader()],              # offloads oversized tool results under offloader/
+)
+```
+
+```typescript
+import { Agent, SessionManager } from '@strands-agents/sdk'
+import { ContextOffloader } from '@strands-agents/sdk/vended-plugins/context-offloader'
+import { DynamoDBStorage } from 'strands-dynamodb-storage'
+
+const storage = new DynamoDBStorage('agent-storage', { region: 'us-east-1' })
+
+// One backend for the whole agent — subsystems without their own storage inherit it.
+const agent = new Agent({
+  storage,
+  sessionManager: new SessionManager({}),   // persists under session/
+  plugins: [new ContextOffloader({})],      // offloads oversized tool results under offloader/
+})
+```
+
+To scope a single subsystem to a different store instead, pass `storage` on that subsystem directly, as the per-language Quick Starts below show.
+
 ### Python
 
 Requires Python 3.10+:
@@ -70,16 +107,36 @@ pip install strands-dynamodb-storage
 ```
 
 ```python
+from strands import Agent
+from strands.session import SnapshotSessionManager
 from strands_dynamodb_storage import DynamoDBStorage
 
 storage = DynamoDBStorage("agent-storage", region_name="us-east-1")
 
+# Persist the agent's session to DynamoDB — nothing else to wire.
+agent = Agent(session_manager=SnapshotSessionManager("s1", storage=storage))
+agent("Remember that my favorite color is blue.")
+```
+
+The same instance plugs into every SDK subsystem that accepts a `Storage`. Offload oversized tool
+results to DynamoDB via the context offloader:
+
+```python
+from strands import Agent
+from strands.vended_plugins.context_offloader import ContextOffloader
+
+agent = Agent(plugins=[ContextOffloader(storage=storage)])
+```
+
+Or use the byte contract directly:
+
+```python
 await storage.write("sessions/s1/state", b"...")
 await storage.read("sessions/s1/state")
 await storage.list("sessions/s1/")
 ```
 
-The same instance plugs into every SDK subsystem that accepts a `Storage`. The [Python README](python/) covers S3 offload, compression, TTL, multi-tenant prefixes, and vector search.
+The [Python README](python/) covers S3 offload, compression, TTL, multi-tenant prefixes, and vector search.
 
 ### TypeScript
 
@@ -90,10 +147,29 @@ npm install strands-dynamodb-storage
 ```
 
 ```typescript
+import { Agent, SessionManager } from '@strands-agents/sdk'
 import { DynamoDBStorage } from 'strands-dynamodb-storage'
 
 const storage = new DynamoDBStorage('agent-storage', { region: 'us-east-1' })
 
+// Persist the agent's session to DynamoDB — nothing else to wire.
+const agent = new Agent({ sessionManager: new SessionManager({ sessionId: 's1', storage }) })
+await agent.invoke('Remember that my favorite color is blue.')
+```
+
+The same instance plugs into every SDK subsystem that accepts a `Storage`. Offload oversized tool
+results to DynamoDB via the context offloader:
+
+```typescript
+import { Agent } from '@strands-agents/sdk'
+import { ContextOffloader } from '@strands-agents/sdk/vended-plugins/context-offloader'
+
+const agent = new Agent({ plugins: [new ContextOffloader({ storage })] })
+```
+
+Or use the byte contract directly:
+
+```typescript
 await storage.write('sessions/s1/state', data)
 await storage.read('sessions/s1/state')
 await storage.list('sessions/s1/')
