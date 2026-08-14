@@ -88,6 +88,83 @@ await storage.list('sessions/s1/')
 
 More in the [TypeScript README](typescript/), including the structured `DynamoDBListQuery` extension and typed search results.
 
+## Provisioning and permissions
+
+**You own the table.** The package never creates infrastructure: it holds no `CreateTable` or `UpdateTable` permission at runtime, so the table lives in your infrastructure as code next to your other resources, with your tagging, backup, and encryption posture applied. Everything it needs is a table with a string partition key `pk` and a string sort key `sk`:
+
+```bash
+aws dynamodb create-table \
+  --table-name agent-storage \
+  --attribute-definitions AttributeName=pk,AttributeType=S AttributeName=sk,AttributeType=S \
+  --key-schema AttributeName=pk,KeyType=HASH AttributeName=sk,KeyType=RANGE \
+  --billing-mode PAY_PER_REQUEST
+```
+
+On-demand billing suits agent traffic, which is bursty and idles at zero, but provisioned capacity works identically.
+
+**TTL (optional).** Constructing the storage with a TTL stamps an epoch-seconds `expireAt` attribute on every item and filters already-expired items on `read` / `list`. For DynamoDB to physically reap expired items, enable TTL on the table once:
+
+```bash
+aws dynamodb update-time-to-live \
+  --table-name agent-storage \
+  --time-to-live-specification "Enabled=true, AttributeName=expireAt"
+```
+
+**Semantic search (optional).** `search()` runs against a DynamoDB vector index on the same table. The index is created with the table (its name, dimensions, and distance function are immutable afterwards), so size `Dimensions` to your embedding model:
+
+```bash
+aws dynamodb create-table \
+  --table-name agent-storage \
+  --attribute-definitions AttributeName=pk,AttributeType=S AttributeName=sk,AttributeType=S \
+  --key-schema AttributeName=pk,KeyType=HASH AttributeName=sk,KeyType=RANGE \
+  --billing-mode PAY_PER_REQUEST \
+  --vector-indexes '[{
+    "IndexName": "vector_index",
+    "VectorAttribute": {"AttributeName": "vector"},
+    "SearchSchema": [{"AttributeName": "pk", "SearchSchemaElementType": "HASH"}],
+    "Projection": {"ProjectionType": "ALL"},
+    "Dimensions": 1024,
+    "DistanceFunction": "COSINE"
+  }]'
+```
+
+The `SearchSchema` HASH element on `pk` partitions the index the same way the table is partitioned, so every search is scoped to one key space and one tenant's memories can never surface in another's results. A newly created index backfills before it is searchable; wait for `IndexStatus: ACTIVE` with `Backfilling` false in `describe-table` before the first search. The index names above (`vector_index`, `vector`) are the package defaults; both are configurable. Requires an up-to-date AWS CLI, and SDK floors of `boto3 >= 1.43.64` / `@aws-sdk/client-dynamodb >= 3.1103.0`.
+
+**S3 offload (optional).** Values above the DynamoDB item-size limit offload to a bucket you provide (`s3Bucket` / `s3_bucket`); objects are keyed by the item's full storage key under an optional prefix. Overwrites and deletes reclaim the object, and if you enable TTL, add an S3 lifecycle rule as the backstop: DynamoDB reaping an expired pointer item does not delete its S3 object.
+
+**Runtime permissions.** The package issues exactly these operations, so least privilege is:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AgentStorageTable",
+      "Effect": "Allow",
+      "Action": ["dynamodb:PutItem", "dynamodb:GetItem", "dynamodb:DeleteItem", "dynamodb:Query"],
+      "Resource": "arn:aws:dynamodb:us-east-1:123456789012:table/agent-storage"
+    },
+    {
+      "Sid": "SemanticSearchOptional",
+      "Effect": "Allow",
+      "Action": "dynamodb:SearchVectors",
+      "Resource": [
+        "arn:aws:dynamodb:us-east-1:123456789012:table/agent-storage",
+        "arn:aws:dynamodb:us-east-1:123456789012:table/agent-storage/index/*"
+      ]
+    },
+    {
+      "Sid": "S3OffloadOptional",
+      "Effect": "Allow",
+      "Action": ["s3:PutObject", "s3:GetObject", "s3:DeleteObject"],
+      "Resource": "arn:aws:s3:::my-offload-bucket/*"
+    }
+  ]
+}
+```
+
+Drop the optional statements for features you don't use. Nothing else is required: no `DescribeTable`, no `Scan`, no table-level wildcards, and credentials resolve through the standard SDK chain (environment, instance profile, or an injected client).
+
 ## Features
 
 Both languages ship the same capabilities with identical semantics.
