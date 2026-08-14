@@ -1,0 +1,58 @@
+name: CI - Python
+
+on:
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'python/**'
+      - '.github/workflows/ci-python.yml'
+  push:
+    branches: [ main ]
+    paths:
+      - 'python/**'
+      - '.github/workflows/ci-python.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-python-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: python
+
+jobs:
+  check:
+    name: Lint, type-check, unit tests (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.10', '3.11', '3.12', '3.13']
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install package with dev extras
+        run: pip install -e '.[dev]'
+
+      - name: Ruff (format check)
+        run: ruff format --check src tests
+
+      - name: Ruff (lint)
+        run: ruff check src tests
+
+      - name: mypy (strict)
+        run: mypy src
+
+      - name: Unit tests (moto, no AWS credentials)
+        # tests/integ is gated behind RUN_INTEG and is intentionally not run here.
+        run: pytest tests -q
