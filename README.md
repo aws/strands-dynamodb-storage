@@ -1,4 +1,14 @@
 <div align="center">
+  <p>
+    <a href="https://aws.amazon.com/dynamodb/">
+      <img src=".github/assets/dynamodb.svg" alt="Amazon DynamoDB" width="78" height="78">
+    </a>
+    &nbsp;&nbsp;&nbsp;
+    <a href="https://strandsagents.com">
+      <img src="https://strandsagents.com/latest/assets/logo-github.svg" alt="Strands Agents" width="41" height="78">
+    </a>
+  </p>
+
   <h1>
     Strands DynamoDB Storage
   </h1>
