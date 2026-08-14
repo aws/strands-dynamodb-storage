@@ -11,10 +11,6 @@ on:
 permissions:
   contents: read
 
-defaults:
-  run:
-    working-directory: typescript
-
 jobs:
   check-tag:
     name: Check tag is typescript-v*
@@ -37,6 +33,9 @@ jobs:
     needs: check-tag
     if: needs.check-tag.outputs.should_publish == 'true'
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: typescript
     # Create an `npm` environment in repo settings to gate publishes behind
     # required reviewers. Publishing uses npm trusted publishing (OIDC): register
     # this repository + workflow + environment as a trusted publisher on the
