@@ -3,4 +3,6 @@
 
 # Every change requires review from a maintainer. Branch protection on main is
 # configured to require CODEOWNERS review, so this file is what enforces it.
-* @LeeroyHannigan
+# Ownership sits with the team rather than an individual so maintainer changes
+# are a team-membership edit, not a CODEOWNERS commit.
+* @aws/dynamodb-opensource
