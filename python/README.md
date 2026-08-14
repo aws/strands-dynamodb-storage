@@ -47,6 +47,46 @@ await store.delete("sessions/s1/snapshot.json")
 - Native vector `search()` via Amazon DynamoDB vector indexes (`SearchVectors`,
   requires boto3 >= 1.43.64); a `vector_search` adapter can override the call.
 
+## Semantic search
+
+`search()` gives an agent semantic long-term memory over the same table: write each memory
+with its embedding, then query by meaning. Scoring runs *in the database* against a DynamoDB
+vector index (no second vector store, no ETL), and because the index is partitioned on `pk`,
+every search is scoped to the caller's key space -- one tenant's memories can never surface
+in another's results. Creating the table with a vector index (and the IAM permissions needed)
+is covered in the repository README's [Provisioning and permissions](../#provisioning-and-permissions).
+
+```python
+from strands_dynamodb_storage import DynamoDBStorage, SearchQuery
+
+store = DynamoDBStorage("agent-memory", region_name="us-east-1", prefix="user/u1")
+
+# store a memory with its embedding (kept inline even when the payload offloads to S3)
+await store.write(
+    "memories/m1",
+    b"likes window seats",
+    vector=embed("likes window seats"),   # your embedding model, e.g. 1024 floats
+    metadata={"kind": "preference"},
+)
+
+# recall by meaning, scoped to this store's partition
+results = await store.search(SearchQuery(
+    vector=embed("seating preferences?"),
+    top_k=5,
+    pk="user/u1/memories",                # required: the index declares a HASH element
+    filter={"kind": "preference"},        # optional metadata equality filter
+    include_values=True,                  # hydrate each match's stored bytes
+))
+for r in results:
+    print(r.key, r.score, r.data)
+# ordered most-similar-first; score direction follows the index's distance function
+# (COSINE/EUCLIDEAN: lower = nearer; DOT_PRODUCT: higher = more similar)
+```
+
+Like a global secondary index, the vector index is eventually consistent, and a freshly
+created index backfills before it is searchable. Requires `boto3 >= 1.43.64`; a
+`vector_search` adapter, when configured, overrides the native call (testing, custom routing).
+
 ## Development
 
 ```bash

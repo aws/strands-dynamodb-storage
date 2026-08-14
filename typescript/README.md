@@ -29,6 +29,9 @@ aws dynamodb create-table --table-name agent-data \
   --billing-mode PAY_PER_REQUEST --region us-east-1
 ```
 
+You own the table: the package never creates infrastructure and holds no `CreateTable` permission at runtime. TTL
+enablement and vector index creation are covered in [Provisioning and permissions](../#provisioning-and-permissions).
+
 ## Quick start — session persistence, zero custom code
 
 ```ts
@@ -106,22 +109,24 @@ Stamps a DynamoDB-native epoch-seconds `expireAt` attribute (enable TTL on that 
 cleanup). `read`/`list` also filter items whose expiry has passed, covering the lag before DynamoDB physically deletes
 them. With S3 offload, add an S3 lifecycle rule to reclaim offloaded objects (TTL removes only the DynamoDB pointer).
 
-## Vector search — DynamoDB native vector index
+## Semantic search — DynamoDB native vector index
 
-`search()` is an optional, feature-detected part of the `Storage` contract: consumers do `if (storage.search) { … }` and
-fall back to client-side KNN when a backend doesn't implement it. On DynamoDB it runs against the **native vector index**,
-so nearest-neighbour scoring happens *in the database*.
+`search()` gives an agent semantic long-term memory over the same table: write each memory with its embedding, then
+query by meaning. It is an optional, feature-detected part of the `Storage` contract: consumers do `if (storage.search) { … }`
+and fall back to client-side KNN when a backend doesn't implement it. On DynamoDB it runs against the **native vector
+index**, so nearest-neighbour scoring happens *in the database* -- no second vector store, no ETL -- and because the index
+is partitioned on `pk`, every search is scoped to the caller's key space. Creating the table with a vector index (and the
+IAM permissions needed) is covered in the repository README's [Provisioning and permissions](../#provisioning-and-permissions).
 
 Write an embedding alongside the bytes, then query:
 
 ```ts
-import { DynamoDBStorage, type VectorSearchAdapter } from 'strands-dynamodb-storage'
+import { DynamoDBStorage } from 'strands-dynamodb-storage'
 
 const store = new DynamoDBStorage('agent-memory', {
   region: 'us-east-1',
-  indexName: 'vector_index',        // vector index on the table
-  vectorAttribute: 'vector',
-  vectorSearch: myAdapter,          // adapter that issues DynamoDB SearchVectors (see below)
+  indexName: 'vector_index',        // vector index on the table (the default)
+  vectorAttribute: 'vector',        // item attribute holding the embedding (the default)
 })
 
 // store a memory with its embedding (kept inline even when the payload offloads to S3)
@@ -191,8 +196,18 @@ The adapter is purely an override: with none configured, `search()` issues the n
 }
 ```
 
-(The S3 statement is only needed when `s3Bucket` is configured. Vector `search()` additionally needs the DynamoDB
-vector-search action on the table/index once that API is generally available.)
+(The S3 statement is only needed when `s3Bucket` is configured. Semantic `search()` additionally needs
+`dynamodb:SearchVectors` on the table and its indexes:)
+
+```json
+{ "Effect": "Allow",
+  "Action": "dynamodb:SearchVectors",
+  "Resource": ["arn:aws:dynamodb:us-east-1:ACCOUNT:table/agent-data",
+               "arn:aws:dynamodb:us-east-1:ACCOUNT:table/agent-data/index/*"] }
+```
+
+The full provisioning story (TTL enablement, vector index creation, and the complete least-privilege policy) is in the
+repository README's [Provisioning and permissions](../#provisioning-and-permissions).
 
 ## License
 
