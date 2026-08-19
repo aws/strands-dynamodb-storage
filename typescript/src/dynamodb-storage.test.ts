@@ -514,6 +514,15 @@ describe('DynamoDBStorage — TTL', () => {
     expect(item.expireAt).toBeUndefined()
   })
 
+  it('floors a fractional ttlSeconds to an integer stamp', async () => {
+    const { storage, client } = newStorage({ ttlSeconds: 3600 })
+    const before = Math.floor(Date.now() / 1000)
+    await storage.write('sessions/s1/a', bytes('v'), { ttlSeconds: 90.5 })
+    const item = [...client.items.values()][0]!
+    expect(Number.isInteger(item.expireAt)).toBe(true)
+    expect(item.expireAt).toBeGreaterThanOrEqual(before + 90)
+  })
+
   it('lets a per-write ttlSeconds override the instance default', async () => {
     const { storage, client } = newStorage({ ttlSeconds: 60 })
     const before = Math.floor(Date.now() / 1000)

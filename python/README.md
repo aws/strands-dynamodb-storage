@@ -53,7 +53,7 @@ await store.delete("sessions/s1/snapshot.json")
 - Single-table design (`pk`/`sk`), with a structured `DynamoDBListQuery` extension point.
 - Optional Amazon S3 offload for values above the item-size limit (`s3_bucket=...`).
 - Optional gzip `compression="gzip"` (applied before the offload check).
-- Optional per-item TTL (`ttl_seconds=...`) with read/list expiry filtering.
+- Optional per-item TTL (`ttl_seconds=...`) with read/list expiry filtering (search does not filter; see below).
 - Native vector `search()` via Amazon DynamoDB vector indexes (`SearchVectors`,
   requires boto3 >= 1.43.64); a `vector_search` adapter can override the call.
 
@@ -65,6 +65,11 @@ vector index (no second vector store, no ETL), and because the index is partitio
 every search is scoped to the caller's key space -- one tenant's memories can never surface
 in another's results. Creating the table with a vector index (and the IAM permissions needed)
 is covered in the repository README's [Provisioning and permissions](../#provisioning-and-permissions).
+
+Two behaviours to know: `pk` is required whenever the index's `SearchSchema` declares a HASH
+element (the provisioning guide's setup does) and must be omitted when it doesn't. And because
+TTL deletion is asynchronous, `search()` can briefly return items whose expiry has passed but
+which DynamoDB has not yet physically deleted -- expiry filtering applies to `read`/`list` only.
 
 ```python
 from strands_dynamodb_storage import DynamoDBStorage, SearchQuery
@@ -83,7 +88,7 @@ await store.write(
 results = await store.search(SearchQuery(
     vector=embed("seating preferences?"),
     top_k=5,
-    pk="user/u1/memories",                # required: the index declares a HASH element
+    pk="user/u1",                         # the physical partition: the full key's first two segments
     filter={"kind": "preference"},        # optional metadata equality filter
     include_values=True,                  # hydrate each match's stored bytes
 ))

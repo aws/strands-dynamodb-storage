@@ -343,6 +343,57 @@ async def test_no_stamp_without_ttl_even_with_override(aws):
     assert "expireAt" not in raw_item(aws[0], "sessions/s1/a")
 
 
+async def test_float_ttl_duration_stamps_integer(aws):
+    """A fractional duration must floor to an integer stamp (type hints aren't enforced)."""
+    s = make(aws, ttl_seconds=3600)
+    await s.write("sessions/s1/a", b"v", ttl_seconds=90.5)  # type: ignore[arg-type]
+    raw = raw_item(aws[0], "sessions/s1/a")["expireAt"]["N"]
+    assert "." not in raw
+    assert int(raw) >= int(time.time()) + 90
+
+
+async def test_read_tolerates_foreign_float_ttl(aws):
+    """Another producer on the shared table may stamp a fractional epoch value.
+
+    An expired float filters like an expired int; a future float passes through;
+    neither crashes read().
+    """
+    ddb, _ = aws
+    s = make(aws, ttl_seconds=3600)
+    await s.write("sessions/s1/dead", b"D")
+    await s.write("sessions/s1/live", b"L")
+    for key, stamp in (("sessions/s1/dead", time.time() - 60.5), ("sessions/s1/live", time.time() + 3600.5)):
+        pk, sk = _split(key)
+        ddb.update_item(
+            TableName=TABLE,
+            Key={"pk": {"S": pk}, "sk": {"S": sk}},
+            UpdateExpression="SET expireAt = :v",
+            ExpressionAttributeValues={":v": {"N": str(stamp)}},
+        )
+    assert await s.read("sessions/s1/dead") is None
+    assert await s.read("sessions/s1/live") == b"L"
+
+
+async def test_read_ignores_wrong_type_ttl_attribute(aws):
+    """A TTL attribute of the wrong type is another writer's bug, not a read() crash.
+
+    DynamoDB's N type won't accept a non-numeric string, so the worst a foreign
+    writer can do beyond a float is stamp the attribute as a different type (S
+    here): the "N" lookup misses and the item is treated as not expired.
+    """
+    ddb, _ = aws
+    s = make(aws, ttl_seconds=3600)
+    await s.write("sessions/s1/a", b"v")
+    pk, sk = _split("sessions/s1/a")
+    ddb.update_item(
+        TableName=TABLE,
+        Key={"pk": {"S": pk}, "sk": {"S": sk}},
+        UpdateExpression="SET expireAt = :v",
+        ExpressionAttributeValues={":v": {"S": "not-a-number"}},
+    )
+    assert await s.read("sessions/s1/a") == b"v"
+
+
 # --------------------------------------------------------------------- namespace
 
 
