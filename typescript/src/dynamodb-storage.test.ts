@@ -22,6 +22,8 @@ class FakeDocumentClient {
   }
   /** Captured input of the last SearchVectorsCommand, for request-shape assertions. */
   lastSearchVectorsInput: any = null
+  /** Number of GetCommand point reads issued, for read-avoidance assertions. */
+  getCalls = 0
   async send(command: any): Promise<any> {
     const input = command.input
     if (command instanceof SearchVectorsCommand) {
@@ -38,7 +40,18 @@ class FakeDocumentClient {
             Math.sqrt(v.reduce((a, x) => a + x * x, 0)) * Math.sqrt(queryVector.reduce((a, x) => a + x * x, 0))
           const cosineDistance = 1 - (norm === 0 ? 0 : dot / norm)
           const { vector: _v, ...rest } = item
-          return { Item: marshall(rest), Score: cosineDistance }
+          // Honor ProjectionExpression the way the service does: return only the
+          // projected attributes (all names are aliased through #placeholders).
+          let projected = rest
+          if (input.ProjectionExpression) {
+            const wanted = new Set<string>(
+              input.ProjectionExpression.split(',').map(
+                (alias: string) => input.ExpressionAttributeNames[alias.trim()]
+              )
+            )
+            projected = Object.fromEntries(Object.entries(rest).filter(([k]) => wanted.has(k)))
+          }
+          return { Item: marshall(projected), Score: cosineDistance }
         })
         .sort((a, b) => a.Score - b.Score)
         .slice(0, input.TopK)
@@ -51,6 +64,7 @@ class FakeDocumentClient {
       return input.ReturnValues === 'ALL_OLD' && old ? { Attributes: old } : {}
     }
     if (command instanceof GetCommand) {
+      this.getCalls += 1
       return { Item: this.items.get(this._k(input.Key.pk, input.Key.sk)) }
     }
     if (command instanceof DeleteCommand) {
@@ -379,6 +393,49 @@ describe('DynamoDBStorage — vector search', () => {
     const results = await storage.search({ vector: [1, 0, 0], topK: 2 })
     expect(results.map((r) => r.key)).toEqual(['memory/u1/a', 'memory/u1/b'])
     expect(results[0]!.score).toBeGreaterThanOrEqual(results[1]!.score)
+  })
+
+  it('projects the response floor: keys + metadata, payload attrs only with includeValues', async () => {
+    const { storage, client } = newStorage()
+    await storage.write('tenant/a/m1', bytes('v'), { vector: [1, 0, 0] })
+    await storage.search({ vector: [1, 0, 0], topK: 1 })
+    expect(client.lastSearchVectorsInput.ProjectionExpression).toBe('#pk, #sk, #m')
+    expect(client.lastSearchVectorsInput.ExpressionAttributeNames).toMatchObject({
+      '#pk': 'pk',
+      '#sk': 'sk',
+      '#m': 'meta',
+    })
+    await storage.search({ vector: [1, 0, 0], topK: 1, includeValues: true })
+    expect(client.lastSearchVectorsInput.ProjectionExpression).toBe('#pk, #sk, #m, #d, #s3, #z')
+  })
+
+  it('includeValues reuses the projected payload without a point read', async () => {
+    const { storage, client } = newStorage()
+    await storage.write('tenant/a/m1', bytes('inline payload'), { vector: [1, 0, 0] })
+    client.getCalls = 0
+    const results = await storage.search({ vector: [1, 0, 0], topK: 1, includeValues: true })
+    expect(new TextDecoder().decode(results[0]!.data!)).toBe('inline payload')
+    expect(client.getCalls).toBe(0)
+  })
+
+  it('includeValues decodes a gzip-compressed projected payload', async () => {
+    const { storage, client } = newStorage({ compression: 'gzip' })
+    const compressible = 'a'.repeat(2048)
+    await storage.write('tenant/a/m1', bytes(compressible), { vector: [1, 0, 0] })
+    client.getCalls = 0
+    const results = await storage.search({ vector: [1, 0, 0], topK: 1, includeValues: true })
+    expect(new TextDecoder().decode(results[0]!.data!)).toBe(compressible)
+    expect(client.getCalls).toBe(0)
+  })
+
+  it('includeValues falls back to a point read for an S3-offloaded payload', async () => {
+    const { storage, client } = newStorage({ s3: true })
+    const big = new Uint8Array(380_001).fill(65)
+    await storage.write('tenant/a/big', big, { vector: [1, 0, 0] })
+    client.getCalls = 0
+    const results = await storage.search({ vector: [1, 0, 0], topK: 1, includeValues: true })
+    expect(results[0]!.data!.byteLength).toBe(380_001)
+    expect(client.getCalls).toBe(1)
   })
 
   it('hydrates stored bytes when includeValues is set', async () => {
