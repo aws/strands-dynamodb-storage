@@ -413,6 +413,14 @@ describe('DynamoDBStorage — vector search', () => {
     await expect(storage.search({ vector: [1, 0, 0], topK: 0 })).rejects.toThrow(/topK/)
   })
 
+  it('write rejects non-finite vectors with the same message as search', async () => {
+    const { storage, client } = newStorage()
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+      await expect(storage.write('sessions/s1/m', bytes('v'), { vector: [bad, 0] })).rejects.toThrow(/non-finite/)
+    }
+    expect(client.items.size).toBe(0)
+  })
+
   it('native path rejects non-finite query vectors', async () => {
     const { storage } = newStorage()
     await expect(storage.search({ vector: [Number.NaN, 0], topK: 1 })).rejects.toThrow(/non-finite/)
