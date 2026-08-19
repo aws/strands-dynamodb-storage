@@ -247,7 +247,9 @@ class DynamoDBStorage:
             extra[_META_ATTR] = _marshal_meta(metadata)
         effective_ttl = ttl_seconds if ttl_seconds is not None else self._ttl_seconds
         if self._ttl_enabled and effective_ttl is not None:
-            extra[self._ttl_attribute] = {"N": str(int(time.time()) + effective_ttl)}
+            # Floor the whole stamp: a float duration (e.g. 90.5) must not emit a
+            # fractional value that other readers of the shared table may not parse.
+            extra[self._ttl_attribute] = {"N": str(int(time.time() + effective_ttl))}
 
         payload = data
         compressed = False
@@ -530,9 +532,21 @@ class DynamoDBStorage:
         return "/".join(segments[:2]), ("/".join(segments[2:]) or _SENTINEL_SK)
 
     def _is_expired(self, item: dict[str, Any]) -> bool:
-        """True when the item's TTL attribute holds a past epoch-seconds value."""
+        """True when the item's TTL attribute holds a past epoch-seconds value.
+
+        Parses leniently: the table is shared infrastructure, and another producer
+        may stamp a fractional epoch value (``time.time()`` untruncated). DynamoDB's
+        reaper compares numerically, so a float is a valid TTL; a value this code
+        cannot parse is treated as not expired -- filtering is this method's job,
+        not validating other writers' data.
+        """
         raw = item.get(self._ttl_attribute, {}).get("N")
-        return raw is not None and int(raw) <= int(time.time())
+        if raw is None:
+            return False
+        try:
+            return float(raw) <= time.time()
+        except ValueError:
+            return False
 
     def _assert_pk_in_scope(self, pk: str) -> None:
         """Reject a caller-supplied partition key that falls outside this namespace.

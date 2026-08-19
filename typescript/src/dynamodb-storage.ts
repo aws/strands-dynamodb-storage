@@ -239,7 +239,8 @@ export class DynamoDBStorage implements Storage<string | DynamoDBListQuery> {
     if (options?.metadata) extra[META_ATTR] = options.metadata
     const ttlSeconds = options?.ttlSeconds ?? this._ttlSeconds
     if (this._ttlEnabled && ttlSeconds !== undefined) {
-      extra[this._ttlAttribute] = Math.floor(Date.now() / 1000) + ttlSeconds
+      // Floor the whole stamp so a fractional ttlSeconds can't emit a fractional value.
+      extra[this._ttlAttribute] = Math.floor(Date.now() / 1000 + ttlSeconds)
     }
     // Compress before the size check so compressible values can stay inline (and out
     // of S3). Keep the compressed form only when it actually shrinks, and record the
