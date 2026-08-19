@@ -63,7 +63,12 @@ class DynamoDBListQuery:
 
 @dataclass
 class SearchQuery:
-    """Vector similarity query for the optional native vector index."""
+    """Vector similarity query for the optional native vector index.
+
+    ``pk`` is required when the index's ``SearchSchema`` declares a HASH element
+    (the documented tenant-scoping setup does; the service rejects an unpinned
+    search against such an index) and must be omitted when it doesn't.
+    """
 
     vector: builtins.list[float]
     top_k: int
@@ -237,12 +242,18 @@ class DynamoDBStorage:
         # The embedding stays inline even when the payload offloads, because the
         # native vector index can only index an on-item attribute.
         if vector is not None:
+            # Mirror of the query-side check in _native_vector_search: the service
+            # rejects non-finite values anyway, but as an opaque write failure.
+            if not all(math.isfinite(component) for component in vector):
+                raise StorageError("Vector contains non-finite values (nan/inf); the DynamoDB N type rejects them.")
             extra[self._vector_attribute] = {"L": [{"N": str(component)} for component in vector]}
         if metadata is not None:
             extra[_META_ATTR] = _marshal_meta(metadata)
         effective_ttl = ttl_seconds if ttl_seconds is not None else self._ttl_seconds
         if self._ttl_enabled and effective_ttl is not None:
-            extra[self._ttl_attribute] = {"N": str(int(time.time()) + effective_ttl)}
+            # Floor the whole stamp: a float duration (e.g. 90.5) must not emit a
+            # fractional value that other readers of the shared table may not parse.
+            extra[self._ttl_attribute] = {"N": str(int(time.time() + effective_ttl))}
 
         payload = data
         compressed = False
@@ -410,7 +421,10 @@ class DynamoDBStorage:
         depends on the index's distance function: for COSINE and EUCLIDEAN lower
         is closer; for DOT_PRODUCT higher is more similar. Results are returned
         in the service's most-similar-first order. Like a global secondary
-        index, the vector index is eventually consistent.
+        index, the vector index is eventually consistent. Unlike ``read``/``list``,
+        results are not filtered for TTL expiry: because TTL deletion is
+        asynchronous, a search can briefly return items whose expiry has passed
+        but which DynamoDB has not yet physically deleted.
 
         Raises:
             StorageError: If the search fails or ``top_k`` is out of range.
@@ -542,9 +556,21 @@ class DynamoDBStorage:
         return "/".join(segments[:2]), ("/".join(segments[2:]) or _SENTINEL_SK)
 
     def _is_expired(self, item: dict[str, Any]) -> bool:
-        """True when the item's TTL attribute holds a past epoch-seconds value."""
+        """True when the item's TTL attribute holds a past epoch-seconds value.
+
+        Parses leniently: the table is shared infrastructure, and another producer
+        may stamp a fractional epoch value (``time.time()`` untruncated). DynamoDB's
+        reaper compares numerically, so a float is a valid TTL; a value this code
+        cannot parse is treated as not expired -- filtering is this method's job,
+        not validating other writers' data.
+        """
         raw = item.get(self._ttl_attribute, {}).get("N")
-        return raw is not None and int(raw) <= int(time.time())
+        if raw is None:
+            return False
+        try:
+            return float(raw) <= time.time()
+        except ValueError:
+            return False
 
     def _assert_pk_in_scope(self, pk: str) -> None:
         """Reject a caller-supplied partition key that falls outside this namespace.
