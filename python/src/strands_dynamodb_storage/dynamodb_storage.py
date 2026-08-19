@@ -63,7 +63,12 @@ class DynamoDBListQuery:
 
 @dataclass
 class SearchQuery:
-    """Vector similarity query for the optional native vector index."""
+    """Vector similarity query for the optional native vector index.
+
+    ``pk`` is required when the index's ``SearchSchema`` declares a HASH element
+    (the documented tenant-scoping setup does; the service rejects an unpinned
+    search against such an index) and must be omitted when it doesn't.
+    """
 
     vector: builtins.list[float]
     top_k: int
@@ -410,7 +415,10 @@ class DynamoDBStorage:
         depends on the index's distance function: for COSINE and EUCLIDEAN lower
         is closer; for DOT_PRODUCT higher is more similar. Results are returned
         in the service's most-similar-first order. Like a global secondary
-        index, the vector index is eventually consistent.
+        index, the vector index is eventually consistent. Unlike ``read``/``list``,
+        results are not filtered for TTL expiry: because TTL deletion is
+        asynchronous, a search can briefly return items whose expiry has passed
+        but which DynamoDB has not yet physically deleted.
 
         Raises:
             StorageError: If the search fails or ``top_k`` is out of range.
