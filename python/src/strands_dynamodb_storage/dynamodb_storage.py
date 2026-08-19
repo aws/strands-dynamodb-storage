@@ -242,6 +242,10 @@ class DynamoDBStorage:
         # The embedding stays inline even when the payload offloads, because the
         # native vector index can only index an on-item attribute.
         if vector is not None:
+            # Mirror of the query-side check in _native_vector_search: the service
+            # rejects non-finite values anyway, but as an opaque write failure.
+            if not all(math.isfinite(component) for component in vector):
+                raise StorageError("Vector contains non-finite values (nan/inf); the DynamoDB N type rejects them.")
             extra[self._vector_attribute] = {"L": [{"N": str(component)} for component in vector]}
         if metadata is not None:
             extra[_META_ATTR] = _marshal_meta(metadata)

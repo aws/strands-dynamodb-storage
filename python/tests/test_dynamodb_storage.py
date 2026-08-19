@@ -492,6 +492,16 @@ async def test_search_native_rejects_nonfinite_vector(aws):
         await storage.search(SearchQuery(vector=[float("nan"), 0.0], top_k=1))
 
 
+async def test_write_rejects_nonfinite_vector(aws):
+    """Mirror of the query-side check: same input, same clear client-side message."""
+    storage = make(aws)
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        with pytest.raises(StorageError, match="non-finite"):
+            await storage.write("sessions/s1/m", b"v", vector=[bad, 0.0])
+    # and the item was never written
+    assert raw_item(aws[0], "sessions/s1/m") is None
+
+
 async def test_search_native_filter_overfetches_and_postfilters(aws):
     ddb, _ = aws
     storage = make(aws, prefix="tenant/a/")

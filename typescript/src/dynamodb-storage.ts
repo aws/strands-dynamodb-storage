@@ -235,7 +235,14 @@ export class DynamoDBStorage implements Storage<string | DynamoDBListQuery> {
     const extra: Record<string, unknown> = {}
     // The embedding stays inline in DynamoDB even when the payload is offloaded,
     // because the native vector index can only index an on-item attribute.
-    if (options?.vector) extra[this._vectorAttribute] = options.vector
+    if (options?.vector) {
+      // Mirror of the query-side check in search(): the service rejects
+      // non-finite values anyway, but as an opaque write failure.
+      if (!options.vector.every((v) => Number.isFinite(v))) {
+        throw new StorageError('Vector contains non-finite values (nan/inf); the DynamoDB N type rejects them.')
+      }
+      extra[this._vectorAttribute] = options.vector
+    }
     if (options?.metadata) extra[META_ATTR] = options.metadata
     const ttlSeconds = options?.ttlSeconds ?? this._ttlSeconds
     if (this._ttlEnabled && ttlSeconds !== undefined) {
