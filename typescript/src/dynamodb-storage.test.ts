@@ -45,9 +45,7 @@ class FakeDocumentClient {
           let projected = rest
           if (input.ProjectionExpression) {
             const wanted = new Set<string>(
-              input.ProjectionExpression.split(',').map(
-                (alias: string) => input.ExpressionAttributeNames[alias.trim()]
-              )
+              input.ProjectionExpression.split(',').map((alias: string) => input.ExpressionAttributeNames[alias.trim()])
             )
             projected = Object.fromEntries(Object.entries(rest).filter(([k]) => wanted.has(k)))
           }
