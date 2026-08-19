@@ -416,7 +416,10 @@ export class DynamoDBStorage implements Storage<string | DynamoDBListQuery> {
    * direction depends on the index's distance function: for COSINE and EUCLIDEAN
    * lower is closer; for DOT_PRODUCT higher is more similar. Results arrive in
    * the service's most-similar-first order. Like a global secondary index, the
-   * vector index is eventually consistent.
+   * vector index is eventually consistent. Unlike `read`/`list`, results are not
+   * filtered for TTL expiry: because TTL deletion is asynchronous, a search can
+   * briefly return items whose expiry has passed but which DynamoDB has not yet
+   * physically deleted.
    *
    * @throws {@link StorageError} if the search fails or `topK` is out of range
    */
