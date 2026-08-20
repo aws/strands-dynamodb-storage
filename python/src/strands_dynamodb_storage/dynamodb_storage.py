@@ -457,7 +457,10 @@ class DynamoDBStorage:
                     continue
                 data = None
                 if query.include_values:
-                    data = await self.read(key)
+                    # The native path decodes the projected payload into the match;
+                    # offloaded values, narrow projections, and adapter matches fall
+                    # back to a point read (which also fetches from S3 and decompresses).
+                    data = match["data"] if "data" in match else await self.read(key)
                 results.append(SearchResult(key=key, score=match["score"], data=data, metadata=match.get("metadata")))
             return results
         except StorageError:
@@ -488,15 +491,27 @@ class DynamoDBStorage:
         if query.filter is not None:
             top_k = min(query.top_k * _FILTER_OVERFETCH, _MAX_TOP_K)
 
+        # Project only what the response is for: keys (to rebuild the storage key)
+        # and metadata (results + client-side filter), adding the payload and its
+        # s3/gzip flags only when the caller asked for values. Everything else the
+        # index projects (ProjectionType ALL projects the whole item) is billed
+        # response bytes for data nobody reads. Every name is aliased: `data` is a
+        # DynamoDB reserved word.
+        names: dict[str, str] = {"#pk": _PK, "#sk": _SK, "#m": _META_ATTR}
+        projection = "#pk, #sk, #m"
+        if query.include_values:
+            names.update({"#d": _DATA_ATTR, "#s3": _S3_ATTR, "#z": _Z_ATTR})
+            projection += ", #d, #s3, #z"
         request: dict[str, Any] = {
             "TableName": self._table_name,
             "IndexName": self._index_name,
             "SearchVector": [{"N": str(v)} for v in query.vector],
             "TopK": top_k,
+            "ProjectionExpression": projection,
+            "ExpressionAttributeNames": names,
         }
         if query.pk is not None:
             request["SearchConditionExpression"] = "#pk = :pk"
-            request["ExpressionAttributeNames"] = {"#pk": _PK}
             request["ExpressionAttributeValues"] = {":pk": {"S": query.pk}}
 
         client = self._get_client()
@@ -514,6 +529,11 @@ class DynamoDBStorage:
             match: dict[str, Any] = {"key": full_key, "score": float(result["Score"])}
             if metadata is not None:
                 match["metadata"] = metadata
+            if query.include_values and not item.get(_S3_ATTR, {}).get("BOOL"):
+                blob = item.get(_DATA_ATTR, {}).get("B")
+                if blob is not None:
+                    raw = bytes(blob)
+                    match["data"] = gzip.decompress(raw) if item.get(_Z_ATTR, {}).get("BOOL") is True else raw
             matches.append(match)
             if len(matches) >= query.top_k:
                 break

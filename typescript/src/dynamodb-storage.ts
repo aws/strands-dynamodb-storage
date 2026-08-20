@@ -433,7 +433,8 @@ export class DynamoDBStorage implements Storage<string | DynamoDBListQuery> {
   async search(query: SearchQuery): Promise<SearchResult[]> {
     if (query.pk !== undefined) this._assertPkInScope(query.pk)
     try {
-      const matches = this._vectorSearch
+      const matches: Array<{ key: string; score: number; metadata?: Record<string, unknown>; data?: Uint8Array }> = this
+        ._vectorSearch
         ? await this._vectorSearch({
             tableName: this._tableName,
             indexName: this._indexName,
@@ -454,7 +455,10 @@ export class DynamoDBStorage implements Storage<string | DynamoDBListQuery> {
         const result: SearchResult = { key, score: match.score }
         if (match.metadata !== undefined) result.metadata = match.metadata
         if (query.includeValues) {
-          const data = await this.read(key)
+          // The native path decodes the projected payload into the match; offloaded
+          // values, narrow projections, and adapter matches fall back to a point
+          // read (which also fetches from S3 and decompresses).
+          const data = match.data !== undefined ? match.data : await this.read(key)
           if (data) result.data = data
         }
         results.push(result)
@@ -478,7 +482,7 @@ export class DynamoDBStorage implements Storage<string | DynamoDBListQuery> {
    */
   private async _nativeVectorSearch(
     query: SearchQuery
-  ): Promise<Array<{ key: string; score: number; metadata?: Record<string, unknown> }>> {
+  ): Promise<Array<{ key: string; score: number; metadata?: Record<string, unknown>; data?: Uint8Array }>> {
     if (query.topK < 1 || query.topK > MAX_TOP_K) {
       throw new StorageError(`topK must be between 1 and ${MAX_TOP_K} (SearchVectors TopK limit); got ${query.topK}`)
     }
@@ -492,21 +496,34 @@ export class DynamoDBStorage implements Storage<string | DynamoDBListQuery> {
     const { SearchVectorsCommand } = await import('@aws-sdk/client-dynamodb')
     const { unmarshall } = await import('@aws-sdk/util-dynamodb')
     const client = await this._getClient()
+    // Project only what the response is for: keys (to rebuild the storage key)
+    // and metadata (results + client-side filter), adding the payload and its
+    // s3/gzip flags only when the caller asked for values. Everything else the
+    // index projects (ProjectionType ALL projects the whole item) is billed
+    // response bytes for data nobody reads. Every name is aliased: `data` is a
+    // DynamoDB reserved word.
+    const names: Record<string, string> = { '#pk': PK, '#sk': SK, '#m': META_ATTR }
+    let projection = '#pk, #sk, #m'
+    if (query.includeValues) {
+      Object.assign(names, { '#d': DATA_ATTR, '#s3': S3_ATTR, '#z': Z_ATTR })
+      projection += ', #d, #s3, #z'
+    }
     const response = await client.send(
       new SearchVectorsCommand({
         TableName: this._tableName,
         IndexName: this._indexName,
         SearchVector: query.vector.map((v) => ({ N: String(v) })),
         TopK: topK,
+        ProjectionExpression: projection,
+        ExpressionAttributeNames: names,
         ...(query.pk !== undefined && {
           SearchConditionExpression: '#pk = :pk',
-          ExpressionAttributeNames: { '#pk': PK },
           ExpressionAttributeValues: { ':pk': { S: query.pk } },
         }),
       })
     )
 
-    const matches: Array<{ key: string; score: number; metadata?: Record<string, unknown> }> = []
+    const matches: Array<{ key: string; score: number; metadata?: Record<string, unknown>; data?: Uint8Array }> = []
     for (const result of response.SearchResults ?? []) {
       if (!result.Item || result.Score === undefined) continue
       const item = unmarshall(result.Item)
@@ -515,7 +532,19 @@ export class DynamoDBStorage implements Storage<string | DynamoDBListQuery> {
       const fullKey = sk === '' || sk === '\u0000' ? pk : `${pk}/${sk}`
       const metadata = item[META_ATTR] as Record<string, unknown> | undefined
       if (query.filter !== undefined && !DynamoDBStorage._matchesSearchFilter(metadata, query.filter)) continue
-      matches.push({ key: fullKey, score: result.Score, ...(metadata !== undefined && { metadata }) })
+      const match: { key: string; score: number; metadata?: Record<string, unknown>; data?: Uint8Array } = {
+        key: fullKey,
+        score: result.Score,
+        ...(metadata !== undefined && { metadata }),
+      }
+      if (query.includeValues && item[S3_ATTR] !== true) {
+        const stored = item[DATA_ATTR] as Uint8Array | undefined
+        if (stored !== undefined) {
+          const raw = new Uint8Array(stored)
+          match.data = item[Z_ATTR] === true ? new Uint8Array(await gunzipAsync(raw)) : raw
+        }
+      }
+      matches.push(match)
       if (matches.length >= query.topK) break
     }
     return matches

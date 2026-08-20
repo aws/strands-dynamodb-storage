@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import gzip
 import math
 import time
 from unittest import mock
@@ -532,6 +533,77 @@ async def test_search_native_filter_overfetches_and_postfilters(aws):
     # Over-fetched (top_k * factor, capped at 100), then post-filtered to top_k.
     assert sv.call_args.kwargs["TopK"] == 20
     assert [r.key for r in results] == ["m2", "m3"]
+
+
+async def test_search_native_projects_response_floor(aws):
+    """The request asks only for keys + metadata; payload attrs only with include_values."""
+    ddb, _ = aws
+    storage = make(aws)
+    resp = {"SearchResults": []}
+    with mock.patch.object(ddb, "search_vectors", create=True, return_value=resp) as sv:
+        await storage.search(SearchQuery(vector=[1.0], top_k=1, pk="tenant/a"))
+    req = sv.call_args.kwargs
+    assert req["ProjectionExpression"] == "#pk, #sk, #m"
+    assert req["ExpressionAttributeNames"] == {"#pk": "pk", "#sk": "sk", "#m": "meta"}
+    with mock.patch.object(ddb, "search_vectors", create=True, return_value=resp) as sv:
+        await storage.search(SearchQuery(vector=[1.0], top_k=1, pk="tenant/a", include_values=True))
+    req = sv.call_args.kwargs
+    assert req["ProjectionExpression"] == "#pk, #sk, #m, #d, #s3, #z"
+    assert req["ExpressionAttributeNames"]["#d"] == "data"
+
+
+async def test_search_include_values_reuses_projected_payload(aws):
+    """A projected inline payload is decoded from the hit; no GetItem is issued."""
+    ddb, _ = aws
+    storage = make(aws)
+    resp = {
+        "SearchResults": [
+            {
+                "Item": {
+                    "pk": {"S": "tenant/a"},
+                    "sk": {"S": "m1"},
+                    "data": {"B": b"inline payload"},
+                },
+                "Score": 0.1,
+            },
+            {
+                "Item": {
+                    "pk": {"S": "tenant/a"},
+                    "sk": {"S": "m2"},
+                    "data": {"B": gzip.compress(b"compressed payload")},
+                    "z": {"BOOL": True},
+                },
+                "Score": 0.2,
+            },
+        ]
+    }
+    with (
+        mock.patch.object(ddb, "search_vectors", create=True, return_value=resp),
+        mock.patch.object(ddb, "get_item", wraps=ddb.get_item) as gi,
+    ):
+        results = await storage.search(SearchQuery(vector=[1.0], top_k=2, pk="tenant/a", include_values=True))
+    assert [r.data for r in results] == [b"inline payload", b"compressed payload"]
+    assert gi.call_count == 0
+
+
+async def test_search_include_values_falls_back_for_offloaded(aws):
+    """An s3-flagged hit carries no inline payload; the point read fetches from S3."""
+    ddb, _ = aws
+    storage = make(aws, s3_bucket=BUCKET)
+    big = b"A" * 380_001
+    await storage.write("tenant/a/big", big, vector=[1.0])
+    resp = {
+        "SearchResults": [
+            {"Item": {"pk": {"S": "tenant/a"}, "sk": {"S": "big"}, "s3": {"BOOL": True}}, "Score": 0.1},
+        ]
+    }
+    with (
+        mock.patch.object(ddb, "search_vectors", create=True, return_value=resp),
+        mock.patch.object(ddb, "get_item", wraps=ddb.get_item) as gi,
+    ):
+        results = await storage.search(SearchQuery(vector=[1.0], top_k=1, pk="tenant/a", include_values=True))
+    assert results[0].data == big
+    assert gi.call_count == 1
 
 
 async def test_search_native_drops_foreign_namespace_matches(aws):
