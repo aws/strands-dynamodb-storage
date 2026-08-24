@@ -268,6 +268,26 @@ describe('DynamoDBStorage — listing', () => {
     expect(keys).toEqual(['sessions/s1/k/2', 'sessions/s1/k/3'])
   })
 
+  it('a trailing slash in the prefix excludes sibling keys sharing the string prefix', async () => {
+    const { storage } = newStorage()
+    await storage.write('sessions/s1/turns/1', bytes('a'))
+    await storage.write('sessions/s1/turnstile', bytes('b')) // sibling sharing the string prefix, not under 'turns/'
+    await storage.write('sessions/s1/turns', bytes('c'))
+    expect(await storage.list('sessions/s1/turns/')).toEqual(['sessions/s1/turns/1'])
+    expect(await storage.list('sessions/s1/turns')).toEqual([
+      'sessions/s1/turns',
+      'sessions/s1/turns/1',
+      'sessions/s1/turnstile',
+    ])
+  })
+
+  it('a trailing slash in the prefix excludes the partition sentinel row', async () => {
+    const { storage } = newStorage()
+    await storage.write('sessions/s1', bytes('root'))
+    await storage.write('sessions/s1/a', bytes('a'))
+    expect(await storage.list('sessions/s1/')).toEqual(['sessions/s1/a'])
+  })
+
   it('rejects a too-broad string prefix that cannot resolve a partition', async () => {
     const { storage } = newStorage()
     await expect(storage.list('sessions/')).rejects.toThrow(/too broad/)

@@ -162,6 +162,26 @@ async def test_list_structured_query_and_between_and_start_after(aws):
     assert await s.list(DynamoDBListQuery(pk=pk, start_after=f"{pk}/k/2")) == [f"{pk}/k/3", f"{pk}/k/4"]
 
 
+async def test_list_trailing_slash_excludes_sibling_keys(aws):
+    s = make(aws)
+    await s.write("sessions/s1/turns/1", b"a")
+    await s.write("sessions/s1/turnstile", b"b")  # sibling sharing the string prefix, not under 'turns/'
+    await s.write("sessions/s1/turns", b"c")
+    assert await s.list("sessions/s1/turns/") == ["sessions/s1/turns/1"]
+    assert await s.list("sessions/s1/turns") == [
+        "sessions/s1/turns",
+        "sessions/s1/turns/1",
+        "sessions/s1/turnstile",
+    ]
+
+
+async def test_list_trailing_slash_excludes_partition_sentinel_row(aws):
+    s = make(aws)
+    await s.write("sessions/s1", b"root")
+    await s.write("sessions/s1/a", b"a")
+    assert await s.list("sessions/s1/") == ["sessions/s1/a"]
+
+
 async def test_list_rejects_broad_prefix_and_dual_sk(aws):
     s = make(aws)
     with pytest.raises(StorageError, match="too broad"):

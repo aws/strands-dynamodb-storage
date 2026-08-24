@@ -623,7 +623,14 @@ class DynamoDBStorage:
             )
         pk = "/".join(segments[:2])
         sk_prefix = "/".join(segments[2:])
-        return await self._list_by_query(DynamoDBListQuery(pk=pk, sk_prefix=sk_prefix or None))
+        # Restore the trailing slash the segment split drops:
+        # 'a/b/turns/' must not match 'a/b/turnstile'.
+        if sk_prefix and full.endswith("/"):
+            sk_prefix += "/"
+        keys = await self._list_by_query(DynamoDBListQuery(pk=pk, sk_prefix=sk_prefix or None))
+        # begins_with on the sort key can't exclude the partition's sentinel row;
+        # enforce true string-prefix semantics on the full key.
+        return [key for key in keys if key.startswith(normalized)]
 
     async def _list_by_query(self, query: DynamoDBListQuery) -> builtins.list[str]:
         if query.sk_prefix is not None and query.sk_between is not None:

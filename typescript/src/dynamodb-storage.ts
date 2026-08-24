@@ -630,8 +630,14 @@ export class DynamoDBStorage implements Storage<string | DynamoDBListQuery> {
       )
     }
     const pk = segments.slice(0, 2).join('/')
-    const skPrefix = segments.slice(2).join('/')
-    return this._listByQuery(skPrefix ? { pk, skPrefix } : { pk })
+    let skPrefix = segments.slice(2).join('/')
+    // Restore the trailing slash the segment split drops:
+    // 'a/b/turns/' must not match 'a/b/turnstile'.
+    if (skPrefix && full.endsWith('/')) skPrefix += '/'
+    const keys = await this._listByQuery(skPrefix ? { pk, skPrefix } : { pk })
+    // begins_with on the sort key can't exclude the partition's sentinel row;
+    // enforce true string-prefix semantics on the full key.
+    return keys.filter((key) => key.startsWith(normalized))
   }
 
   private async _listByQuery(query: DynamoDBListQuery): Promise<string[]> {
