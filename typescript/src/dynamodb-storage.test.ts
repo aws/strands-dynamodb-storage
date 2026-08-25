@@ -7,6 +7,7 @@ import { PutCommand, GetCommand, DeleteCommand, QueryCommand } from '@aws-sdk/li
 import { marshall } from '@aws-sdk/util-dynamodb'
 import { PutObjectCommand, GetObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3'
 import { StorageError } from '@strands-agents/sdk'
+import type { Storage } from '@strands-agents/sdk/storage'
 import { DynamoDBStorage, type VectorSearchAdapter } from './dynamodb-storage.js'
 import * as pkgIndex from './index.js'
 
@@ -394,6 +395,19 @@ describe('DynamoDBStorage — namespace + prefix', () => {
 })
 
 describe('DynamoDBStorage — vector search', () => {
+  it('satisfies the SDK Storage contract under its default type parameters', () => {
+    // Compile-time pin: SessionManager and other SDK consumers accept `Storage`
+    // (string queries), so this assignment must type-check.
+    const { storage } = newStorage({ vector: true })
+    const contract: Storage = storage
+    expect(contract).toBe(storage)
+  })
+
+  it('rejects a plain-string query with an actionable error', async () => {
+    const { storage } = newStorage({ vector: true })
+    await expect(storage.search('what are this user preferences?')).rejects.toThrow(/pre-computed embedding vector/)
+  })
+
   it('stores the embedding inline when a vector is written', async () => {
     const { storage, client } = newStorage({ vector: true })
     await storage.write('memory/u1/m1', bytes('likes window seats'), { vector: [1, 0, 0], metadata: { kind: 'pref' } })
