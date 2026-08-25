@@ -221,6 +221,14 @@ The adapter is purely an override: with none configured, `search()` issues the n
 The full provisioning story (TTL enablement, vector index creation, and the complete least-privilege policy) is in the
 repository README's [Provisioning and permissions](../#provisioning-and-permissions).
 
+## Examples
+
+Runnable, live-verified examples for every capability, from session resume to a
+customer-support capstone, live in the
+[examples library](https://github.com/aws/strands-dynamodb-storage/tree/main/examples).
+The scripts are Python; this package is a feature-parity mirror, so every pattern
+translates directly.
+
 ## License
 
 Apache-2.0

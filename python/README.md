@@ -102,6 +102,12 @@ Like a global secondary index, the vector index is eventually consistent, and a 
 created index backfills before it is searchable. Requires `boto3 >= 1.43.64`; a
 `vector_search` adapter, when configured, overrides the native call (testing, custom routing).
 
+## Examples
+
+Runnable, live-verified examples for every capability, from session resume to a
+customer-support capstone, live in the
+[examples library](https://github.com/aws/strands-dynamodb-storage/tree/main/examples).
+
 ## Development
 
 ```bash
