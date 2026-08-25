@@ -400,11 +400,12 @@ describe('DynamoDBStorage — vector search', () => {
     // (string queries), so this assignment must type-check.
     const { storage } = newStorage({ vector: true })
     const contract: Storage = storage
-    expect(contract).toBe(storage)
+    expect(typeof contract.search).toBe('function')
   })
 
   it('rejects a plain-string query with an actionable error', async () => {
     const { storage } = newStorage({ vector: true })
+    await expect(storage.search('what are this user preferences?')).rejects.toBeInstanceOf(StorageError)
     await expect(storage.search('what are this user preferences?')).rejects.toThrow(/pre-computed embedding vector/)
   })
 
