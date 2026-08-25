@@ -177,6 +177,10 @@ await storage.list('sessions/s1/')
 
 More in the [TypeScript README](typescript/), including the structured `DynamoDBListQuery` extension and typed search results.
 
+## Examples
+
+The [examples library](examples/) carries a runnable, live-verified example for each capability: session resume across restarts, semantic long-term memory with the Memory Manager, multi-tenant isolation, self-expiring TTL state, S3 offload for oversized values, and a customer-support capstone that combines them on one table. Each is a self-contained directory you can copy into your own project.
+
 ## Provisioning and permissions
 
 **You own the table.** The package never creates infrastructure: it holds no `CreateTable` or `UpdateTable` permission at runtime, so the table lives in your infrastructure as code next to your other resources, with your tagging, backup, and encryption posture applied. Everything it needs is a table with a string partition key `pk` and a string sort key `sk`:
