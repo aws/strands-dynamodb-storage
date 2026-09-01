@@ -61,7 +61,7 @@ import { DynamoDBStorage } from 'strands-dynamodb-storage'
 const store = new DynamoDBStorage('agent-data', { region: 'us-east-1' })
 
 await store.write('sessions/s1/snapshot.json', new TextEncoder().encode('{"turn":1}'))
-const bytes = await store.read('sessions/s1/snapshot.json')   // Uint8Array | null
+const bytes = await store.read('sessions/s1/snapshot.json') // Uint8Array | null
 
 // list by string prefix -> a native partition Query with begins_with
 const keys = await store.list('sessions/s1/')
@@ -90,7 +90,7 @@ so point operations are single-item `PutItem`/`GetItem`/`DeleteItem` and listing
 ```ts
 const store = new DynamoDBStorage('agent-data', {
   region: 'us-east-1',
-  s3Bucket: 'my-agent-offload-bucket',   // values > ~380 KB go to S3; a pointer item stays in DynamoDB
+  s3Bucket: 'my-agent-offload-bucket', // values > ~380 KB go to S3; a pointer item stays in DynamoDB
 })
 ```
 
@@ -110,7 +110,7 @@ setting; values that don't shrink are stored uncompressed.
 ## TTL (optional)
 
 ```ts
-new DynamoDBStorage('agent-data', { region: 'us-east-1', ttlSeconds: 86_400 })  // 1 day
+new DynamoDBStorage('agent-data', { region: 'us-east-1', ttlSeconds: 86_400 }) // 1 day
 // per-write override:
 await store.write('sessions/tmp/x', data, { ttlSeconds: 3_600 })
 ```
@@ -124,9 +124,12 @@ return items whose expiry has passed but which DynamoDB has not yet physically d
 ## Semantic search — DynamoDB native vector index
 
 `search()` gives an agent semantic long-term memory over the same table: write each memory with its embedding, then
-query by meaning. It is an optional, feature-detected part of the `Storage` contract: consumers do `if (storage.search) { … }`
-and fall back to client-side KNN when a backend doesn't implement it. On DynamoDB it runs against the **native vector
-index**, so nearest-neighbour scoring happens *in the database* -- no second vector store, no ETL -- and because the index
+query by meaning. It is an optional, feature-detected part of the `Storage` contract (`if (storage.search) { … }`).
+This store searches pre-computed embedding vectors and does not embed text: pass a `SearchQuery` with a `vector`, as
+every example does. A plain-string query is rejected with a `StorageError` at runtime, so a text-search consumer that
+expects the backend to embed for it must wrap this store with an embedding bridge rather than wiring it in directly.
+On DynamoDB the search runs against the **native vector
+index**, so nearest-neighbour scoring happens _in the database_ -- no second vector store, no ETL -- and because the index
 is partitioned on `pk`, every search is scoped to the caller's key space. Creating the table with a vector index (and the
 IAM permissions needed) is covered in the repository README's [Provisioning and permissions](../#provisioning-and-permissions).
 
@@ -137,8 +140,8 @@ import { DynamoDBStorage } from 'strands-dynamodb-storage'
 
 const store = new DynamoDBStorage('agent-memory', {
   region: 'us-east-1',
-  indexName: 'vector_index',        // vector index on the table (the default)
-  vectorAttribute: 'vector',        // item attribute holding the embedding (the default)
+  indexName: 'vector_index', // vector index on the table (the default)
+  vectorAttribute: 'vector', // item attribute holding the embedding (the default)
 })
 
 // store a memory with its embedding (kept inline even when the payload offloads to S3)
@@ -151,9 +154,9 @@ await store.write('memory/u1/m1', new TextEncoder().encode('likes window seats')
 const results = await store.search({
   vector: queryEmbedding,
   topK: 5,
-  pk: 'memory/u1',          // required when the index declares a HASH element
-  filter: { kind: 'preference' },   // optional metadata equality filter (applied client-side)
-  includeValues: true,      // hydrate each match's stored bytes
+  pk: 'memory/u1', // required when the index declares a HASH element
+  filter: { kind: 'preference' }, // optional metadata equality filter (applied client-side)
+  includeValues: true, // hydrate each match's stored bytes
 })
 // results: Array<{ key: string; score: number; data?: Uint8Array; metadata?: Record<string, unknown> }>
 // ordered nearest-first; score direction follows the index's distance function
@@ -182,15 +185,15 @@ The adapter is purely an override: with none configured, `search()` issues the n
 
 ## Configuration reference
 
-| Option | Purpose |
-|--------|---------|
-| `region` / `client` | AWS region, or a pre-built `DynamoDBDocumentClient` (mutually exclusive) |
-| `prefix` | Key prefix prepended to every key (a namespace within the table) |
-| `s3Bucket` / `s3Prefix` / `s3Client` | S3 offload target for large values |
-| `compression` | `'gzip'` \| `'none'` (default `'none'`) |
-| `ttlSeconds` / `ttlAttribute` | TTL duration + attribute name (default `expireAt`) |
-| `indexName` / `vectorAttribute` | Vector index + embedding attribute (default `vector_index` / `vector`) |
-| `vectorSearch` | Adapter that performs the native vector search |
+| Option                               | Purpose                                                                  |
+| ------------------------------------ | ------------------------------------------------------------------------ |
+| `region` / `client`                  | AWS region, or a pre-built `DynamoDBDocumentClient` (mutually exclusive) |
+| `prefix`                             | Key prefix prepended to every key (a namespace within the table)         |
+| `s3Bucket` / `s3Prefix` / `s3Client` | S3 offload target for large values                                       |
+| `compression`                        | `'gzip'` \| `'none'` (default `'none'`)                                  |
+| `ttlSeconds` / `ttlAttribute`        | TTL duration + attribute name (default `expireAt`)                       |
+| `indexName` / `vectorAttribute`      | Vector index + embedding attribute (default `vector_index` / `vector`)   |
+| `vectorSearch`                       | Adapter that performs the native vector search                           |
 
 ## Minimal IAM
 
@@ -198,12 +201,16 @@ The adapter is purely an override: with none configured, `search()` issues the n
 {
   "Version": "2012-10-17",
   "Statement": [
-    { "Effect": "Allow",
-      "Action": ["dynamodb:GetItem","dynamodb:PutItem","dynamodb:DeleteItem","dynamodb:Query"],
-      "Resource": "arn:aws:dynamodb:us-east-1:ACCOUNT:table/agent-data" },
-    { "Effect": "Allow",
-      "Action": ["s3:GetObject","s3:PutObject","s3:DeleteObject"],
-      "Resource": "arn:aws:s3:::my-agent-offload-bucket/*" }
+    {
+      "Effect": "Allow",
+      "Action": ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:DeleteItem", "dynamodb:Query"],
+      "Resource": "arn:aws:dynamodb:us-east-1:ACCOUNT:table/agent-data"
+    },
+    {
+      "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
+      "Resource": "arn:aws:s3:::my-agent-offload-bucket/*"
+    }
   ]
 }
 ```
@@ -212,10 +219,14 @@ The adapter is purely an override: with none configured, `search()` issues the n
 `dynamodb:SearchVectors` on the table and its indexes:)
 
 ```json
-{ "Effect": "Allow",
+{
+  "Effect": "Allow",
   "Action": "dynamodb:SearchVectors",
-  "Resource": ["arn:aws:dynamodb:us-east-1:ACCOUNT:table/agent-data",
-               "arn:aws:dynamodb:us-east-1:ACCOUNT:table/agent-data/index/*"] }
+  "Resource": [
+    "arn:aws:dynamodb:us-east-1:ACCOUNT:table/agent-data",
+    "arn:aws:dynamodb:us-east-1:ACCOUNT:table/agent-data/index/*"
+  ]
+}
 ```
 
 The full provisioning story (TTL enablement, vector index creation, and the complete least-privilege policy) is in the

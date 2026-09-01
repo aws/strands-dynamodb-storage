@@ -428,9 +428,19 @@ export class DynamoDBStorage implements Storage<string | DynamoDBListQuery> {
    * briefly return items whose expiry has passed but which DynamoDB has not yet
    * physically deleted.
    *
-   * @throws {@link StorageError} if the search fails or `topK` is out of range
+   * @throws {@link StorageError} if the search fails, `topK` is out of range, or the
+   *   query is a plain string — this store searches pre-computed embedding vectors and
+   *   does not embed text, so callers must supply a {@link SearchQuery}
    */
-  async search(query: SearchQuery): Promise<SearchResult[]> {
+  async search(query: SearchQuery | string): Promise<SearchResult[]> {
+    if (typeof query === 'string') {
+      // The Storage contract lets consumers pass a natural-language string; this
+      // store has no embedding model, so it cannot honour one.
+      throw new StorageError(
+        'DynamoDBStorage.search requires a SearchQuery with a pre-computed embedding vector. ' +
+          'Plain-string queries are not supported: embed the text first and pass { vector, topK }.'
+      )
+    }
     if (query.pk !== undefined) this._assertPkInScope(query.pk)
     try {
       const matches: Array<{ key: string; score: number; metadata?: Record<string, unknown>; data?: Uint8Array }> = this
