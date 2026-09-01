@@ -61,6 +61,18 @@ parked in bay 42.
 The second process started with nothing in memory. The answer came from the
 snapshot in DynamoDB.
 
+The same flow in TypeScript:
+
+```bash
+npm install @strands-agents/sdk strands-dynamodb-storage tsx
+
+npx tsx session-resume.ts --table agent-storage tell \
+  "My rental car is a blue Nissan Micra, parked in bay 42"
+
+npx tsx session-resume.ts --table agent-storage ask \
+  "What car am I driving and where is it parked?"
+```
+
 ## Why DynamoDB here
 
 Session state sits on the hot path of every agent turn: it is loaded before

@@ -51,6 +51,13 @@ pip install strands-dynamodb-storage boto3
 python ttl_sessions.py --table agent-storage
 ```
 
+Or the TypeScript equivalent:
+
+```bash
+npm install strands-dynamodb-storage @aws-sdk/client-dynamodb @aws-sdk/lib-dynamodb tsx
+npx tsx ttl-sessions.ts --table agent-storage
+```
+
 ```text
 wrote session/cart with ttl_seconds=8, profile/consent with no TTL
 before expiry: read session/cart -> b'3 items, checkout not started'

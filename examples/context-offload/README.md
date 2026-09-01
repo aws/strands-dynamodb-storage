@@ -44,6 +44,13 @@ pip install strands-dynamodb-storage boto3
 python context_offload.py --table agent-storage --bucket my-offload-bucket
 ```
 
+Or the TypeScript equivalent:
+
+```bash
+npm install strands-dynamodb-storage @strands-agents/sdk @aws-sdk/client-dynamodb @aws-sdk/lib-dynamodb @aws-sdk/client-s3 tsx
+npx tsx context-offload.ts --table agent-storage --bucket my-offload-bucket
+```
+
 ```text
 wrote 26 B and 1,036,013 B through the same contract
 read back 26 B and 1,036,013 B, both intact
