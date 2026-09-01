@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "strands-dynamodb-storage"
-version = "0.1.0"
+version = "0.1.2"
 description = "Amazon DynamoDB storage backend for the Strands Agents SDK"
 readme = "README.md"
 requires-python = ">=3.10"
