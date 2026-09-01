@@ -42,7 +42,7 @@ class FakeDocumentClient {
     if (command instanceof SearchVectorsCommand) {
       const input = command.input
       this.lastSearchVectorsInput = input
-      const queryVector: number[] = (input.SearchVector ?? []).map((av) => Number(av.N))
+      const queryVector: number[] = input.SearchVector!.map((av) => Number(av.N))
       const pkFilter = input.ExpressionAttributeValues?.[':pk']?.S
       const scored = [...this.items.values()]
         .filter((item): item is StoredItem & { vector: number[] } => Array.isArray(item.vector))
