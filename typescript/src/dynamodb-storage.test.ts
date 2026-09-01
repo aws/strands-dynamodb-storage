@@ -3,13 +3,7 @@
 
 import { describe, expect, it } from 'vitest'
 import { SearchVectorsCommand, type SearchVectorsCommandInput } from '@aws-sdk/client-dynamodb'
-import {
-  PutCommand,
-  GetCommand,
-  DeleteCommand,
-  QueryCommand,
-  type DynamoDBDocumentClient,
-} from '@aws-sdk/lib-dynamodb'
+import { PutCommand, GetCommand, DeleteCommand, QueryCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 import { marshall } from '@aws-sdk/util-dynamodb'
 import { PutObjectCommand, GetObjectCommand, DeleteObjectCommand, type S3Client } from '@aws-sdk/client-s3'
 import { StorageError } from '@strands-agents/sdk'
@@ -62,7 +56,7 @@ class FakeDocumentClient {
           const { vector: _v, ...rest } = item
           // Honor ProjectionExpression the way the service does: return only the
           // projected attributes (all names are aliased through #placeholders).
-          let projected = rest
+          let projected: Record<string, unknown> = rest
           if (input.ProjectionExpression) {
             const wanted = new Set<string>(
               input.ProjectionExpression.split(',').map((alias) => input.ExpressionAttributeNames![alias.trim()]!)
@@ -100,7 +94,7 @@ class FakeDocumentClient {
       const pk = v[':pk'] as string
       let matched = [...this.items.values()].filter((item) => item.pk === pk)
       if (v[':sk'] !== undefined) matched = matched.filter((i) => String(i.sk).startsWith(v[':sk'] as string))
-      if (v[':from'] !== undefined) matched = matched.filter((i) => i.sk >= v[':from'] && i.sk <= v[':to'])
+      if (v[':from'] !== undefined) matched = matched.filter((i) => i.sk >= v[':from']! && i.sk <= v[':to']!)
       // Model the TTL FilterExpression: only present when the caller opted into TTL.
       if (v[':now'] !== undefined) {
         const ttlName = input.ExpressionAttributeNames!['#ttl']!
@@ -163,7 +157,11 @@ function cosineAdapter(client: FakeDocumentClient): VectorSearchAdapter {
   return async ({ pk, vector, topK }) => {
     return [...client.items.values()]
       .filter((i) => (pk ? i.pk === pk : true) && Array.isArray(i.vector))
-      .map((i) => ({ key: i.k as string, score: cosine(vector, i.vector as number[]), metadata: i.meta }))
+      .map((i) => ({
+        key: i.k as string,
+        score: cosine(vector, i.vector as number[]),
+        metadata: i.meta as Record<string, unknown> | undefined,
+      }))
       .sort((a, b) => b.score - a.score)
       .slice(0, topK)
   }

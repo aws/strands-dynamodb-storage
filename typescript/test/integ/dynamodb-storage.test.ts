@@ -105,7 +105,9 @@ beforeAll(async () => {
     await s3.send(
       new CreateBucketCommand({
         Bucket: BUCKET,
-        ...(REGION !== 'us-east-1' ? { CreateBucketConfiguration: { LocationConstraint: REGION as BucketLocationConstraint } } : {}),
+        ...(REGION !== 'us-east-1'
+          ? { CreateBucketConfiguration: { LocationConstraint: REGION as BucketLocationConstraint } }
+          : {}),
       })
     )
     createdBucket = true
