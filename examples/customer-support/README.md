@@ -35,6 +35,16 @@ pip install strands-agents strands-dynamodb-storage
 python support_assistant.py --table agent-storage seed
 ```
 
+Or the TypeScript equivalent:
+
+```bash
+npm install @strands-agents/sdk strands-dynamodb-storage tsx @aws-sdk/client-bedrock-runtime
+npx tsx support-assistant.ts --table agent-storage seed
+```
+
+Every `python support_assistant.py` command below runs the same with
+`npx tsx support-assistant.ts`.
+
 Open a ticket. The symptom shares no words with any stored fact:
 
 ```bash

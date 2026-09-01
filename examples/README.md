@@ -36,13 +36,20 @@ Every example needs a DynamoDB table with string keys `pk` and `sk`; the ones
 that search memories also need a vector index, and each README opens with the
 exact `create-table` call it expects. Credentials follow the least-privilege
 policy in the [repository README](../README.md#provisioning-and-permissions).
-The scripts are Python; the TypeScript package is a feature-parity mirror, so
-every pattern translates directly.
+The scripts come in both languages: each directory carries a Python script
+and a TypeScript mirror side by side, running the same pattern against the
+same table.
 
 ```bash
 pip install strands-agents strands-dynamodb-storage
 cd session-resume
 python session_resume.py --table agent-storage tell "My rental car is a blue Nissan Micra"
+```
+
+```bash
+npm install @strands-agents/sdk strands-dynamodb-storage tsx
+cd session-resume
+npx tsx session-resume.ts --table agent-storage tell "My rental car is a blue Nissan Micra"
 ```
 
 Examples that invoke a model use Amazon Bedrock: the agent examples run on

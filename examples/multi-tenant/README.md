@@ -44,6 +44,13 @@ pip install strands-dynamodb-storage boto3
 python multi_tenant.py --table agent-storage
 ```
 
+Or the TypeScript equivalent:
+
+```bash
+npm install strands-dynamodb-storage @aws-sdk/client-bedrock-runtime tsx
+npx tsx multi-tenant.ts --table agent-storage
+```
+
 ```text
 seeded one coffee memory per user (same logical key memories/m1)
 

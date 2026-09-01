@@ -70,6 +70,16 @@ python semantic_memory.py --table agent-storage ask \
   "Book me a flight seat for my December trip. Which seat should I pick?"
 ```
 
+Or the TypeScript equivalent:
+
+```bash
+npm install @strands-agents/sdk strands-dynamodb-storage @aws-sdk/client-bedrock-runtime tsx
+
+npx tsx semantic-memory.ts --table agent-storage seed
+npx tsx semantic-memory.ts --table agent-storage ask \
+  "Book me a flight seat for my December trip. Which seat should I pick?"
+```
+
 ```text
 Tool #1: search_memory
 Based on your saved preferences and trip details, here's what I found:
