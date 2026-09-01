@@ -2,10 +2,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { describe, expect, it } from 'vitest'
-import { SearchVectorsCommand } from '@aws-sdk/client-dynamodb'
-import { PutCommand, GetCommand, DeleteCommand, QueryCommand } from '@aws-sdk/lib-dynamodb'
+import { SearchVectorsCommand, type SearchVectorsCommandInput } from '@aws-sdk/client-dynamodb'
+import {
+  PutCommand,
+  GetCommand,
+  DeleteCommand,
+  QueryCommand,
+  type DynamoDBDocumentClient,
+} from '@aws-sdk/lib-dynamodb'
 import { marshall } from '@aws-sdk/util-dynamodb'
-import { PutObjectCommand, GetObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3'
+import { PutObjectCommand, GetObjectCommand, DeleteObjectCommand, type S3Client } from '@aws-sdk/client-s3'
 import { StorageError } from '@strands-agents/sdk'
 import type { Storage } from '@strands-agents/sdk/storage'
 import { DynamoDBStorage, type VectorSearchAdapter } from './dynamodb-storage.js'
@@ -16,23 +22,36 @@ import * as pkgIndex from './index.js'
  * backed by a Map keyed by `pk\u0000sk`. Models Put/Get/Delete/Query including
  * ExclusiveStartKey pagination and ReturnValues=ALL_OLD for delete.
  */
+/** Shape of an item as the Document client stores it: key attributes plus whatever the write carried. */
+interface StoredItem {
+  pk: string
+  sk: string
+  k?: string
+  vector?: number[]
+  [attribute: string]: unknown
+}
+
+/** The fakes satisfy the client contracts structurally; the double cast is the seam. */
+const asDocClient = (fake: FakeDocumentClient) => fake as unknown as DynamoDBDocumentClient
+const asS3Client = (fake: FakeS3Client) => fake as unknown as S3Client
+
 class FakeDocumentClient {
-  readonly items = new Map<string, Record<string, any>>()
+  readonly items = new Map<string, StoredItem>()
   private _k(pk: string, sk: string): string {
     return `${pk}\u0000${sk}`
   }
   /** Captured input of the last SearchVectorsCommand, for request-shape assertions. */
-  lastSearchVectorsInput: any = null
+  lastSearchVectorsInput: SearchVectorsCommandInput | null = null
   /** Number of GetCommand point reads issued, for read-avoidance assertions. */
   getCalls = 0
-  async send(command: any): Promise<any> {
-    const input = command.input
+  async send(command: unknown): Promise<unknown> {
     if (command instanceof SearchVectorsCommand) {
+      const input = command.input
       this.lastSearchVectorsInput = input
-      const queryVector: number[] = input.SearchVector.map((av: any) => Number(av.N))
+      const queryVector: number[] = (input.SearchVector ?? []).map((av) => Number(av.N))
       const pkFilter = input.ExpressionAttributeValues?.[':pk']?.S
       const scored = [...this.items.values()]
-        .filter((item) => Array.isArray(item.vector))
+        .filter((item): item is StoredItem & { vector: number[] } => Array.isArray(item.vector))
         .filter((item) => pkFilter === undefined || item.pk === pkFilter)
         .map((item) => {
           const v: number[] = item.vector
@@ -46,7 +65,7 @@ class FakeDocumentClient {
           let projected = rest
           if (input.ProjectionExpression) {
             const wanted = new Set<string>(
-              input.ProjectionExpression.split(',').map((alias: string) => input.ExpressionAttributeNames[alias.trim()])
+              input.ProjectionExpression.split(',').map((alias) => input.ExpressionAttributeNames![alias.trim()]!)
             )
             projected = Object.fromEntries(Object.entries(rest).filter(([k]) => wanted.has(k)))
           }
@@ -57,37 +76,41 @@ class FakeDocumentClient {
       return { SearchResults: scored }
     }
     if (command instanceof PutCommand) {
-      const key = this._k(input.Item.pk, input.Item.sk)
+      const item = command.input.Item as StoredItem
+      const key = this._k(item.pk, item.sk)
       const old = this.items.get(key)
-      this.items.set(key, input.Item)
-      return input.ReturnValues === 'ALL_OLD' && old ? { Attributes: old } : {}
+      this.items.set(key, item)
+      return command.input.ReturnValues === 'ALL_OLD' && old ? { Attributes: old } : {}
     }
     if (command instanceof GetCommand) {
       this.getCalls += 1
-      return { Item: this.items.get(this._k(input.Key.pk, input.Key.sk)) }
+      const k = command.input.Key as { pk: string; sk: string }
+      return { Item: this.items.get(this._k(k.pk, k.sk)) }
     }
     if (command instanceof DeleteCommand) {
-      const key = this._k(input.Key.pk, input.Key.sk)
+      const k = command.input.Key as { pk: string; sk: string }
+      const key = this._k(k.pk, k.sk)
       const old = this.items.get(key)
       this.items.delete(key)
-      return input.ReturnValues === 'ALL_OLD' ? { Attributes: old } : {}
+      return command.input.ReturnValues === 'ALL_OLD' ? { Attributes: old } : {}
     }
     if (command instanceof QueryCommand) {
-      const v = input.ExpressionAttributeValues
-      const pk: string = v[':pk']
+      const input = command.input
+      const v = input.ExpressionAttributeValues as Record<string, string | number>
+      const pk = v[':pk'] as string
       let matched = [...this.items.values()].filter((item) => item.pk === pk)
-      if (v[':sk'] !== undefined) matched = matched.filter((i) => String(i.sk).startsWith(v[':sk']))
+      if (v[':sk'] !== undefined) matched = matched.filter((i) => String(i.sk).startsWith(v[':sk'] as string))
       if (v[':from'] !== undefined) matched = matched.filter((i) => i.sk >= v[':from'] && i.sk <= v[':to'])
       // Model the TTL FilterExpression: only present when the caller opted into TTL.
       if (v[':now'] !== undefined) {
-        const ttlName = input.ExpressionAttributeNames['#ttl']
-        matched = matched.filter((i) => i[ttlName] === undefined || i[ttlName] > v[':now'])
+        const ttlName = input.ExpressionAttributeNames!['#ttl']!
+        matched = matched.filter((i) => i[ttlName] === undefined || (i[ttlName] as number) > (v[':now'] as number))
       }
       matched.sort((a, b) => (a.sk < b.sk ? -1 : a.sk > b.sk ? 1 : 0))
       // Model pagination: one item per page so ExclusiveStartKey is exercised.
       let start = 0
       if (input.ExclusiveStartKey) {
-        const startSk = input.ExclusiveStartKey.sk
+        const startSk = input.ExclusiveStartKey.sk as string
         start = matched.findIndex((i) => i.sk === startSk) + 1
       }
       const page = matched.slice(start, start + 1)
@@ -98,29 +121,28 @@ class FakeDocumentClient {
         LastEvaluatedKey: more && last ? { pk: last.pk, sk: last.sk } : undefined,
       }
     }
-    throw new Error(`unexpected command ${command?.constructor?.name}`)
+    throw new Error(`unexpected command ${(command as object | undefined)?.constructor?.name}`)
   }
 }
 
 /** In-memory stand-in for an S3Client covering Put/Get/Delete of object bytes. */
 class FakeS3Client {
   readonly objects = new Map<string, Uint8Array>()
-  async send(command: any): Promise<any> {
-    const input = command.input
+  async send(command: unknown): Promise<unknown> {
     if (command instanceof PutObjectCommand) {
-      this.objects.set(input.Key, input.Body)
+      this.objects.set(command.input.Key!, command.input.Body as Uint8Array)
       return {}
     }
     if (command instanceof GetObjectCommand) {
-      const body = this.objects.get(input.Key)
+      const body = this.objects.get(command.input.Key!)
       if (!body) throw Object.assign(new Error('NoSuchKey'), { name: 'NoSuchKey' })
       return { Body: { transformToByteArray: async () => body } }
     }
     if (command instanceof DeleteObjectCommand) {
-      this.objects.delete(input.Key)
+      this.objects.delete(command.input.Key!)
       return {}
     }
-    throw new Error(`unexpected S3 command ${command?.constructor?.name}`)
+    throw new Error(`unexpected S3 command ${(command as object | undefined)?.constructor?.name}`)
   }
 }
 
@@ -158,9 +180,9 @@ function newStorage(opts?: {
   const client = new FakeDocumentClient()
   const s3 = new FakeS3Client()
   const storage = new DynamoDBStorage('test-table', {
-    client: client as any,
+    client: asDocClient(client),
     ...(opts?.prefix ? { prefix: opts.prefix } : {}),
-    ...(opts?.s3 ? { s3Bucket: 'test-bucket', s3Client: s3 as any } : {}),
+    ...(opts?.s3 ? { s3Bucket: 'test-bucket', s3Client: asS3Client(s3) } : {}),
     ...(opts?.vector ? { vectorSearch: cosineAdapter(client) } : {}),
     ...(opts?.compression ? { compression: opts.compression } : {}),
     ...(opts?.ttlSeconds !== undefined ? { ttlSeconds: opts.ttlSeconds } : {}),
@@ -336,7 +358,7 @@ describe('DynamoDBStorage — S3 offload', () => {
     const { storage, s3 } = newStorage({ s3: true })
     const sends: unknown[] = []
     const realSend = s3.send.bind(s3)
-    s3.send = async (c: any) => (sends.push(c), realSend(c))
+    s3.send = async (c: unknown) => (sends.push(c), realSend(c))
     await storage.write('sessions/s1/doc', bytes('one'))
     await storage.write('sessions/s1/doc', bytes('two'))
     expect(sends).toHaveLength(0)
@@ -355,7 +377,7 @@ describe('DynamoDBStorage — S3 offload', () => {
     const { storage, s3 } = newStorage({ s3: true })
     await storage.write('sessions/s1/doc', bytes('Z'.repeat(400_001)))
     const realSend = s3.send.bind(s3)
-    s3.send = async (c: any) => {
+    s3.send = async (c: unknown) => {
       if (c instanceof DeleteObjectCommand) throw new Error('s3 down')
       return realSend(c)
     }
@@ -432,14 +454,14 @@ describe('DynamoDBStorage — vector search', () => {
     const { storage, client } = newStorage()
     await storage.write('tenant/a/m1', bytes('v'), { vector: [1, 0, 0] })
     await storage.search({ vector: [1, 0, 0], topK: 1 })
-    expect(client.lastSearchVectorsInput.ProjectionExpression).toBe('#pk, #sk, #m')
-    expect(client.lastSearchVectorsInput.ExpressionAttributeNames).toMatchObject({
+    expect(client.lastSearchVectorsInput!.ProjectionExpression).toBe('#pk, #sk, #m')
+    expect(client.lastSearchVectorsInput!.ExpressionAttributeNames).toMatchObject({
       '#pk': 'pk',
       '#sk': 'sk',
       '#m': 'meta',
     })
     await storage.search({ vector: [1, 0, 0], topK: 1, includeValues: true })
-    expect(client.lastSearchVectorsInput.ProjectionExpression).toBe('#pk, #sk, #m, #d, #s3, #z')
+    expect(client.lastSearchVectorsInput!.ProjectionExpression).toBe('#pk, #sk, #m, #d, #s3, #z')
   })
 
   it('includeValues reuses the projected payload without a point read', async () => {
@@ -492,9 +514,9 @@ describe('DynamoDBStorage — vector search', () => {
     const results = await storage.search({ vector: [1, 0, 0], topK: 2, pk: 'tenant/a' })
     expect(results[0]?.key).toBe('memories/m1') // nearest first, prefix stripped
     expect(results[0]?.metadata).toEqual({ source: 'profile' })
-    expect(client.lastSearchVectorsInput.SearchConditionExpression).toBe('#pk = :pk')
-    expect(client.lastSearchVectorsInput.ExpressionAttributeValues).toEqual({ ':pk': { S: 'tenant/a' } })
-    expect(client.lastSearchVectorsInput.TopK).toBe(2)
+    expect(client.lastSearchVectorsInput!.SearchConditionExpression).toBe('#pk = :pk')
+    expect(client.lastSearchVectorsInput!.ExpressionAttributeValues).toEqual({ ':pk': { S: 'tenant/a' } })
+    expect(client.lastSearchVectorsInput!.TopK).toBe(2)
   })
 
   it('native path enforces the SearchVectors TopK bounds', async () => {
@@ -521,7 +543,7 @@ describe('DynamoDBStorage — vector search', () => {
     await storage.write('m1', bytes('a'), { vector: [1, 0, 0], metadata: { source: 'web' } })
     await storage.write('m2', bytes('b'), { vector: [1, 0.1, 0], metadata: { source: 'profile' } })
     const results = await storage.search({ vector: [1, 0, 0], topK: 1, pk: 'tenant/a', filter: { source: 'profile' } })
-    expect(client.lastSearchVectorsInput.TopK).toBe(10) // topK * over-fetch factor
+    expect(client.lastSearchVectorsInput!.TopK).toBe(10) // topK * over-fetch factor
     expect(results.map((r) => r.key)).toEqual(['m2'])
   })
 
@@ -567,9 +589,9 @@ describe('DynamoDBStorage — compression', () => {
 
   it('reads a compressed item even when the reader has compression disabled', async () => {
     const { client } = newStorage({ compression: 'gzip' })
-    const writer = new DynamoDBStorage('test-table', { client: client as any, compression: 'gzip' })
+    const writer = new DynamoDBStorage('test-table', { client: asDocClient(client), compression: 'gzip' })
     await writer.write('sessions/s1/a', bytes('A'.repeat(2000)))
-    const reader = new DynamoDBStorage('test-table', { client: client as any }) // compression off
+    const reader = new DynamoDBStorage('test-table', { client: asDocClient(client) }) // compression off
     expect(str(await reader.read('sessions/s1/a'))).toBe('A'.repeat(2000))
   })
 
@@ -655,10 +677,10 @@ describe('DynamoDBStorage — TTL read filtering (opt-in)', () => {
   it('does NOT filter when TTL is not enabled (opt-in): a non-TTL reader returns the item', async () => {
     // Written by a TTL-enabled instance with a past expiry...
     const { client } = newStorage({ ttlSeconds: 3600 })
-    const writer = new DynamoDBStorage('test-table', { client: client as any, ttlSeconds: 3600 })
+    const writer = new DynamoDBStorage('test-table', { client: asDocClient(client), ttlSeconds: 3600 })
     await writer.write('sessions/s1/a', bytes('v'), { ttlSeconds: -1 })
     // ...but a reader that did not opt into TTL injects no filter and returns it.
-    const reader = new DynamoDBStorage('test-table', { client: client as any })
+    const reader = new DynamoDBStorage('test-table', { client: asDocClient(client) })
     expect(str(await reader.read('sessions/s1/a'))).toBe('v')
     expect(await reader.list({ pk: 'sessions/s1' })).toEqual(['sessions/s1/a'])
   })
@@ -690,7 +712,7 @@ describe('DynamoDBStorage — construction + error wrapping', () => {
     send: async () => {
       throw new Error('boom')
     },
-  } as any
+  } as unknown as DynamoDBDocumentClient
 
   it('rejects being configured with both client and region', () => {
     expect(() => new DynamoDBStorage('t', { client: boom, region: 'us-east-1' })).toThrow(/both client and region/)
@@ -743,7 +765,7 @@ describe('DynamoDBStorage — namespace isolation', () => {
   function twoTenants(vectorSearch?: VectorSearchAdapter) {
     const client = new FakeDocumentClient()
     const opts = (prefix: string) => ({
-      client: client as any,
+      client: asDocClient(client),
       prefix,
       ...(vectorSearch ? { vectorSearch } : {}),
     })
