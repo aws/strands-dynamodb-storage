@@ -32,6 +32,7 @@ import {
   HeadObjectCommand,
   ListObjectsV2Command,
   S3Client,
+  type BucketLocationConstraint,
 } from '@aws-sdk/client-s3'
 import { STSClient, GetCallerIdentityCommand } from '@aws-sdk/client-sts'
 import { DynamoDBStorage } from '../../src/dynamodb-storage.js'
@@ -104,7 +105,9 @@ beforeAll(async () => {
     await s3.send(
       new CreateBucketCommand({
         Bucket: BUCKET,
-        ...(REGION !== 'us-east-1' ? { CreateBucketConfiguration: { LocationConstraint: REGION as any } } : {}),
+        ...(REGION !== 'us-east-1'
+          ? { CreateBucketConfiguration: { LocationConstraint: REGION as BucketLocationConstraint } }
+          : {}),
       })
     )
     createdBucket = true
