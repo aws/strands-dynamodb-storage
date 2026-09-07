@@ -37,9 +37,14 @@ updates:
       # classify PEP 621 pyproject dependencies as development vs production,
       # so dependency-type grouping never matches for pip. Keep these patterns
       # in sync with the dev extra in python/pyproject.toml — anything missed
-      # here silently falls into production-minor.
+      # here silently falls into production-minor. Majors are excluded so a
+      # breaking dev-tool bump arrives individually, matching the convention
+      # stated at the top of this file.
       development-dependencies:
         applies-to: version-updates
+        update-types:
+          - 'minor'
+          - 'patch'
         patterns:
           - 'hatch'
           - 'moto*'
@@ -75,10 +80,16 @@ updates:
       semver-minor-days: 7
       semver-patch-days: 3
     groups:
-      # All development dependencies in one PR.
+      # Development dependency minor + patch bumps in one PR. Majors are
+      # excluded so a breaking dev-tool bump (e.g. a typescript major ahead
+      # of typescript-eslint peer support) arrives individually instead of
+      # poisoning the whole group.
       development-dependencies:
         dependency-type: 'development'
         applies-to: version-updates
+        update-types:
+          - 'minor'
+          - 'patch'
       # Production minor + patch bumps in one PR.
       production-minor:
         dependency-type: 'production'
