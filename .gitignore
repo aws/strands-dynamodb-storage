@@ -1,2 +1,5 @@
 # Ignore the `build/` directory in the package root.
 /build
+
+# Dependency installs (examples/, typescript/).
+node_modules/
