@@ -16,6 +16,7 @@ directory into your own project and start from there.
 | ⏳ | [ttl-sessions](./ttl-sessions/) | Ephemeral state that expires itself, with no cleanup job to write | Native TTL: stamp on write, filter on read, reap in the background |
 | 📦 | [context-offload](./context-offload/) | A 1 MB value round-trips through the same four-method contract as a 26-byte one | Transparent S3 spillover behind a pointer item |
 | 🎧 | [customer-support](./customer-support/) | The capstone: session resume, semantic recall, and tenant isolation combined in one assistant | One table carrying everything the agent remembers |
+| ☁️ | [agentcore](./agentcore/) | The same wiring hosted on Amazon Bedrock AgentCore Runtime, with sessions keyed by the runtime's session id | Conversation snapshots that survive microVM recycling |
 
 If you are new to the package, run them in that order: each example
 introduces one capability, and the capstone assembles them the way a real
@@ -29,6 +30,7 @@ assistant uses them.
 - "Anonymous sessions are piling up in my table" → [ttl-sessions](./ttl-sessions/)
 - "A tool result blew the 400 KB item limit" → [context-offload](./context-offload/)
 - "Show me all of it working together" → [customer-support](./customer-support/)
+- "I deploy on AgentCore Runtime, where does this fit?" → [agentcore](./agentcore/)
 
 ## Running the examples
 
