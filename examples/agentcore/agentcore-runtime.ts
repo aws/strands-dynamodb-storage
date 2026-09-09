@@ -67,8 +67,11 @@ const server = createServer(async (req, res) => {
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ result: result.lastMessage }))
     } catch (err) {
+      // Keep the details in the container log (CloudWatch on the runtime);
+      // the HTTP caller gets a generic failure with no internals.
+      console.error('invocation failed:', err)
       res.writeHead(500, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ error: String(err) }))
+      res.end(JSON.stringify({ error: 'invocation failed' }))
     }
     return
   }
