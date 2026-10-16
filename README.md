@@ -179,7 +179,7 @@ More in the [TypeScript README](typescript/), including the structured `DynamoDB
 
 ## Examples
 
-The [examples library](examples/) carries a runnable, live-verified example for each capability: session resume across restarts, semantic long-term memory with the Memory Manager, multi-tenant isolation, self-expiring TTL state, S3 offload for oversized values, and a customer-support capstone that combines them on one table. Each is a self-contained directory you can copy into your own project.
+The [examples library](examples/) carries a runnable, live-verified example for each capability: session resume across restarts, semantic long-term memory with the Memory Manager, multi-tenant isolation, self-expiring TTL state, S3 offload for oversized values, and a customer-support capstone that combines them on one table. Each is a self-contained directory you can copy into your own project. The preview lexical document index is the exception: it has no example yet and has only been tested offline, not against AWS.
 
 ## Provisioning and permissions
 
@@ -256,7 +256,7 @@ The `SearchSchema` HASH element on `pk` partitions the index the same way the ta
 }
 ```
 
-Drop the optional statements for features you don't use. Nothing else is required: no `DescribeTable`, no `Scan`, no table-level wildcards, and credentials resolve through the standard SDK chain (environment, instance profile, or an injected client).
+Drop the optional statements for features you don't use. Nothing else is required: no `DescribeTable`, no `Scan`, no table-level wildcards, and credentials resolve through the standard SDK chain (environment, instance profile, or an injected client). The one exception is the opt-in lexical document index (preview), which needs a second table and additional actions listed in the [Python](python/README.md#provisioning-and-iam) and [TypeScript](typescript/README.md#provisioning-and-iam) READMEs.
 
 ## Features
 

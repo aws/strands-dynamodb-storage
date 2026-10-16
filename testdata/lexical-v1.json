@@ -1,0 +1,72 @@
+{
+  "tokenizerVersion": "lexical-v1",
+  "textTerms": [
+    {
+      "input": "ERR_AUTH_403 while calling nexora-prod-7",
+      "terms": ["err_auth_403", "err", "auth", "403", "while", "calling", "nexora-prod-7", "nexora", "prod", "7"]
+    },
+    {
+      "input": "Invoice FC-00123 differs from FC-123",
+      "terms": ["invoice", "fc-00123", "fc", "00123", "differs", "from", "fc-123", "123"]
+    },
+    {
+      "input": "fc fc-1",
+      "terms": ["fc", "fc-1", "1"]
+    },
+    {
+      "input": "Configuración ÁRBOL árbol",
+      "terms": ["configuración", "Árbol", "árbol"]
+    },
+    {
+      "input": "cafe\u0301 CAFE\u0301",
+      "terms": ["café", "cafÉ"]
+    },
+    {
+      "input": "--leading and trailing__",
+      "terms": ["leading", "and", "trailing"]
+    },
+    {
+      "input": "a--b__c x_-_",
+      "terms": ["a--b__c", "a", "b", "c", "x"]
+    },
+    {
+      "input": "v1.2.3 user@example.com a/b",
+      "terms": ["v1", "2", "3", "user", "example", "com", "a", "b"]
+    },
+    {
+      "input": "deploy \ud83d\ude80 ok\u2010done",
+      "terms": ["deploy", "ok", "done"]
+    },
+    {
+      "input": "Ünïcödé 日本語テキスト",
+      "terms": ["Ünïcödé", "日本語テキスト"]
+    },
+    {
+      "input": " \t\n ",
+      "terms": []
+    },
+    {
+      "input": "-- __ -_-",
+      "terms": []
+    }
+  ],
+  "identifiers": {
+    "valid": [
+      { "input": "ERR_AUTH_403", "normalized": "ERR_AUTH_403" },
+      { "input": "err_auth_403", "normalized": "err_auth_403" },
+      { "input": "FC-00123", "normalized": "FC-00123" },
+      { "input": "FC-123", "normalized": "FC-123" },
+      { "input": "A\u0308-1", "normalized": "Ä-1" },
+      { "input": "order 42", "normalized": "order 42" }
+    ],
+    "invalid": ["", " FC-1", "FC-1 ", "FC\t1", "\u00a0FC-1", "FC-1\u2028", "FC\u00001"]
+  },
+  "keys": [
+    { "kind": "term", "scope": "tenant/a/", "value": "fc-00123", "pk": "t|9:tenant/a/8:fc-00123" },
+    { "kind": "term", "scope": "", "value": "café", "pk": "t|0:5:café" },
+    { "kind": "identifier", "scope": "tenant/a/", "value": "FC-00123", "pk": "i|9:tenant/a/8:FC-00123" },
+    { "kind": "identifier", "scope": "t/", "value": "日本", "pk": "i|2:t/6:日本" },
+    { "kind": "manifest", "scope": "tenant/a/", "value": null, "pk": "m|9:tenant/a/" },
+    { "kind": "manifest", "scope": "", "value": null, "pk": "m|0:" }
+  ]
+}

@@ -7,12 +7,13 @@ from __future__ import annotations
 
 import asyncio
 import builtins
+import contextlib
 import gzip
 import math
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
-from typing import Any, Optional, Union
+from typing import Any, Optional, Protocol, Union
 
 from strands.types.exceptions import StorageError
 
@@ -89,6 +90,35 @@ class SearchResult:
     metadata: Optional[dict[str, Any]] = None
 
 
+class _StrategyMatch(Protocol):
+    """Read-only shape of one search-strategy result; the SDK's ``StorageSearchResult`` satisfies it."""
+
+    @property
+    def key(self) -> str: ...
+
+    @property
+    def score(self) -> float: ...
+
+    @property
+    def data(self) -> Optional[bytes]: ...
+
+
+class StringSearchStrategy(Protocol):
+    """Structural shape of the SDK ``SearchStrategy`` as :class:`DynamoDBStorage` uses it.
+
+    Declared here instead of importing the SDK type because the supported SDK floor predates
+    it. :class:`LexicalSearchStrategy` implements it.
+    """
+
+    async def index(self, storage: DynamoDBStorage, key: str, data: bytes, **kwargs: Any) -> None:
+        """Index a value that ``storage`` just wrote; ``kwargs`` carry ``vector``, ``metadata`` and ``ttl_seconds``."""
+        ...
+
+    async def search(self, storage: DynamoDBStorage, query: str, **kwargs: Any) -> Sequence[_StrategyMatch]:
+        """Rank the values stored in ``storage`` for a natural-language ``query``, best first."""
+        ...
+
+
 def _clean_prefix(prefix: str) -> str:
     """Collapse/strip a prefix and add a single trailing slash (empty stays empty)."""
     joined = "/".join(seg for seg in prefix.split("/") if seg)
@@ -124,6 +154,77 @@ def _marshal_meta(meta: dict[str, _MetaValue]) -> dict[str, Any]:
         else:
             out[key] = {"S": str(value)}
     return {"M": out}
+
+
+@dataclass(frozen=True)
+class _DocumentLocation:
+    """Internal: where a document lives. ``key`` is scope-relative; ``doc_id`` is the full stored key."""
+
+    key: str
+    doc_id: str
+    pk: str
+    sk: str
+
+
+@dataclass(frozen=True)
+class _DocumentItemPort:
+    """Internal port through which the lexical index reads and writes base-table items.
+
+    Not part of the public API; obtained from :meth:`DynamoDBStorage._document_item_port`. It only
+    delegates to private storage methods, so indexed items are built by the same code as
+    :meth:`DynamoDBStorage.write`. ``ttl_attribute`` is set only when the storage opted in to TTL,
+    and ``client()`` returns the low-level boto3 client (synchronous; call it through
+    ``asyncio.to_thread``).
+    """
+
+    _storage: DynamoDBStorage
+
+    @property
+    def table_name(self) -> str:
+        """Base table name."""
+        return self._storage._table_name
+
+    @property
+    def scope(self) -> str:
+        """Storage prefix exactly as held (``"tenant/a/"`` or ``""``)."""
+        return self._storage._prefix
+
+    @property
+    def ttl_attribute(self) -> Optional[str]:
+        """TTL attribute name; ``None`` unless the storage opted in to TTL."""
+        return self._storage._ttl_attribute if self._storage._ttl_enabled else None
+
+    def client(self) -> Any:
+        """The storage's (lazily built) low-level DynamoDB client."""
+        return self._storage._get_client()
+
+    def locate(self, key: str) -> _DocumentLocation:
+        """See :meth:`DynamoDBStorage._locate`."""
+        return self._storage._locate(key)
+
+    def relative_key(self, doc_id: str) -> Optional[str]:
+        """The key relative to the storage prefix, or ``None`` when ``doc_id`` is outside it."""
+        return self._storage._strip_prefix(doc_id)
+
+    def is_expired(self, item: dict[str, Any]) -> bool:
+        """See :meth:`DynamoDBStorage._is_ttl_expired`."""
+        return self._storage._is_ttl_expired(item)
+
+    def inline_item(
+        self,
+        location: _DocumentLocation,
+        data: bytes,
+        *,
+        vector: Optional[builtins.list[float]] = None,
+        metadata: Optional[dict[str, _MetaValue]] = None,
+        ttl_seconds: Optional[int] = None,
+    ) -> dict[str, Any]:
+        """See :meth:`DynamoDBStorage._inline_item`."""
+        return self._storage._inline_item(location, data, vector=vector, metadata=metadata, ttl_seconds=ttl_seconds)
+
+    async def delete_offloaded(self, doc_id: str) -> None:
+        """See :meth:`DynamoDBStorage._reclaim_offloaded`."""
+        await self._storage._reclaim_offloaded(doc_id)
 
 
 class DynamoDBStorage:
@@ -168,6 +269,7 @@ class DynamoDBStorage:
         index_name: str = "vector_index",
         vector_attribute: str = "vector",
         vector_search: Optional[VectorSearchAdapter] = None,
+        search_strategy: Optional[StringSearchStrategy] = None,
         boto_session: Any = None,
         boto_client_config: Any = None,
     ) -> None:
@@ -191,6 +293,9 @@ class DynamoDBStorage:
             index_name: Vector index name (for ``search``).
             vector_attribute: Item attribute holding the embedding vector.
             vector_search: Adapter performing the native vector search.
+            search_strategy: Strategy answering plain-string :meth:`search` queries, such as
+                :class:`LexicalSearchStrategy`. As in the SDK's storage backends, every successful
+                :meth:`write` is then passed to its ``index`` hook. Namespaced views share it.
             boto_session: Pre-configured boto3 session. Cannot be combined with region_name.
             boto_client_config: Botocore Config for the created clients.
 
@@ -214,6 +319,7 @@ class DynamoDBStorage:
         self._index_name = index_name
         self._vector_attribute = vector_attribute
         self._vector_search = vector_search
+        self._search_strategy = search_strategy
         self._boto_session = boto_session
         self._boto_client_config = boto_client_config
 
@@ -230,40 +336,20 @@ class DynamoDBStorage:
 
         Values above the item-size limit offload to S3 when ``s3_bucket`` is set.
         An optional ``vector`` (kept inline for the native index) and ``metadata``
-        enable :meth:`search`.
+        enable :meth:`search`. With a ``search_strategy``, the stored value and these
+        options are then passed to the strategy's ``index`` hook.
 
         Raises:
             StorageError: If the key is invalid, the value is oversized with no S3
-                bucket configured, or the write fails.
+                bucket configured, or the write fails; or, with the value already
+                stored, ``"Wrote '<key>' but indexing failed"`` if the hook fails.
         """
         normalized = normalize_key(key)
         full = f"{self._prefix}{normalized}"
         pk, sk = self._split(full)
 
-        extra: dict[str, Any] = {}
-        # The embedding stays inline even when the payload offloads, because the
-        # native vector index can only index an on-item attribute.
-        if vector is not None:
-            # Mirror of the query-side check in _native_vector_search: the service
-            # rejects non-finite values anyway, but as an opaque write failure.
-            if not all(math.isfinite(component) for component in vector):
-                raise StorageError("Vector contains non-finite values (nan/inf); the DynamoDB N type rejects them.")
-            extra[self._vector_attribute] = {"L": [{"N": str(component)} for component in vector]}
-        if metadata is not None:
-            extra[_META_ATTR] = _marshal_meta(metadata)
-        effective_ttl = ttl_seconds if ttl_seconds is not None else self._ttl_seconds
-        if self._ttl_enabled and effective_ttl is not None:
-            # Floor the whole stamp: a float duration (e.g. 90.5) must not emit a
-            # fractional value that other readers of the shared table may not parse.
-            extra[self._ttl_attribute] = {"N": str(int(time.time() + effective_ttl))}
-
-        payload = data
-        compressed = False
-        if self._compress:
-            gz = gzip.compress(data)
-            if len(gz) < len(data):
-                payload = gz
-                compressed = True
+        extra = self._item_extras(vector, metadata, ttl_seconds)
+        payload, compressed = self._encode_value(data)
         if compressed:
             extra[_Z_ATTR] = {"BOOL": True}
 
@@ -285,17 +371,12 @@ class DynamoDBStorage:
                 # object is orphaned forever (a later delete() never reaches it).
                 old = await self._put(item, return_old=bool(self._s3_bucket))
                 if old.get(_S3_ATTR, {}).get("BOOL"):
-                    try:
-                        await self._s3_delete(full)
-                    except Exception:  # noqa: BLE001
-                        # Best-effort: the write itself is durable, so a failed
-                        # cleanup must not fail it. An S3 lifecycle rule is the
-                        # backstop for missed reclamations.
-                        pass
+                    await self._reclaim_offloaded(full)
         except StorageError:
             raise
         except Exception as error:
             raise StorageError(f"Failed to write '{normalized}' to DynamoDB table '{self._table_name}'") from error
+        await self._index_written(normalized, data, vector=vector, metadata=metadata, ttl_seconds=ttl_seconds)
 
     async def read(self, key: str) -> Optional[bytes]:
         """Retrieve the bytes stored under ``key``, or ``None`` if absent.
@@ -316,7 +397,7 @@ class DynamoDBStorage:
                 return None
             # Hide items whose TTL has passed but DynamoDB has not yet reaped (only
             # when TTL is opted in). Runs before any S3 fetch.
-            if self._ttl_enabled and self._is_expired(item):
+            if self._is_ttl_expired(item):
                 return None
             compressed = item.get(_Z_ATTR, {}).get("BOOL") is True
             if item.get(_S3_ATTR, {}).get("BOOL"):
@@ -405,19 +486,25 @@ class DynamoDBStorage:
         kwargs["ttl_attribute"] = self._ttl_attribute
         if self._vector_search is not None:
             kwargs["vector_search"] = self._vector_search
+        if self._search_strategy is not None:
+            kwargs["search_strategy"] = self._search_strategy
         if self._boto_session is not None:
             kwargs["boto_session"] = self._boto_session
         if self._boto_client_config is not None:
             kwargs["boto_client_config"] = self._boto_client_config
         return DynamoDBStorage(self._table_name, **kwargs)
 
-    async def search(self, query: SearchQuery) -> builtins.list[SearchResult]:
+    async def search(self, query: Union[SearchQuery, str]) -> builtins.list[SearchResult]:
         """Nearest-neighbour vector search over items written with a ``vector``.
 
         Optional part of the ``Storage`` contract — consumers feature-detect
         (``hasattr(storage, "search")``) and fall back to client-side KNN when absent.
         Calls DynamoDB ``SearchVectors`` natively (requires boto3 >= 1.43.64); a
         ``vector_search`` adapter, when configured, overrides the native call.
+
+        A plain-string ``query`` is delegated to the configured ``search_strategy`` and its
+        matches are returned as :class:`SearchResult` with ``key``, ``score`` and ``data``
+        (``metadata`` is ``None``); a :class:`SearchQuery` always takes the vector path.
 
         The score is the raw ``Score`` from the vector index and its direction
         depends on the index's distance function: for COSINE and EUCLIDEAN lower
@@ -434,8 +521,11 @@ class DynamoDBStorage:
         search can return fewer than ``top_k`` results.
 
         Raises:
-            StorageError: If the search fails or ``top_k`` is out of range.
+            StorageError: If the search fails, ``top_k`` is out of range, or ``query`` is a
+                plain string and no ``search_strategy`` is configured.
         """
+        if isinstance(query, str):
+            return await self._search_text(query)
         if query.pk is not None:
             self._assert_pk_in_scope(query.pk)
         try:
@@ -476,6 +566,56 @@ class DynamoDBStorage:
             raise
         except Exception as error:
             raise StorageError(f"Failed to search DynamoDB table '{self._table_name}'") from error
+
+    async def _search_text(self, query: str) -> builtins.list[SearchResult]:
+        """Delegate a plain-string query to the search strategy, as the SDK's storage backends do.
+
+        Matches keep the strategy's ``key``, ``score`` and ``data``; ``metadata`` is always ``None``.
+        Errors other than ``StorageError`` are wrapped, like every other failure of this backend.
+
+        Raises:
+            StorageError: If no search strategy is configured, or the strategy fails.
+        """
+        if self._search_strategy is None:
+            raise StorageError(
+                "DynamoDBStorage.search requires a SearchQuery with a pre-computed embedding vector. "
+                "Plain-string queries are not supported without a search_strategy: embed the text first "
+                "and pass SearchQuery(vector=..., top_k=...), or configure a search_strategy "
+                "(for example LexicalSearchStrategy)."
+            )
+        try:
+            matches = await self._search_strategy.search(self, query)
+        except StorageError:
+            raise
+        except Exception as error:
+            raise StorageError(f"Failed to search DynamoDB table '{self._table_name}'") from error
+        return [SearchResult(key=match.key, score=match.score, data=match.data) for match in matches]
+
+    async def _index_written(
+        self,
+        key: str,
+        data: bytes,
+        *,
+        vector: Optional[builtins.list[float]],
+        metadata: Optional[dict[str, _MetaValue]],
+        ttl_seconds: Optional[int],
+    ) -> None:
+        """Pass a completed write to the search strategy's ``index`` hook (a no-op without a strategy).
+
+        ``key`` is the normalized key and the write's ``vector``, ``metadata`` and ``ttl_seconds``
+        are forwarded, so an indexing strategy that re-stores the value keeps them. Any failure,
+        ``StorageError`` included, becomes ``StorageError("Wrote '<key>' but indexing failed")``
+        chaining the cause (the SDK's wording): the value is already stored, and the caller must
+        be able to tell that apart from a failed write.
+        """
+        if self._search_strategy is None:
+            return
+        try:
+            await self._search_strategy.index(
+                self, key, data, vector=vector, metadata=metadata, ttl_seconds=ttl_seconds
+            )
+        except Exception as error:
+            raise StorageError(f"Wrote '{key}' but indexing failed") from error
 
     async def _native_vector_search(self, query: SearchQuery) -> builtins.list[dict[str, Any]]:
         """Issue DynamoDB ``SearchVectors`` directly (GA path, no adapter).
@@ -563,6 +703,114 @@ class DynamoDBStorage:
         return all(metadata.get(k) == v for k, v in filter_dict.items())
 
     # ------------------------------------------------------------------ internals
+
+    def _item_extras(
+        self,
+        vector: Optional[builtins.list[float]],
+        metadata: Optional[dict[str, _MetaValue]],
+        ttl_seconds: Optional[int],
+    ) -> dict[str, Any]:
+        """Optional item attributes shared by every write path: vector, metadata and TTL stamp.
+
+        The embedding stays inline even when the payload offloads, because the native vector
+        index can only index an on-item attribute. Non-finite components are rejected here,
+        mirroring the query-side check in :meth:`_native_vector_search`: the service rejects
+        them anyway, but as an opaque write failure. The TTL stamp is floored as a whole, so
+        a float duration (e.g. 90.5) never emits a fractional value that other readers of the
+        shared table may not parse; it is written only when this instance opted in to TTL.
+
+        Raises:
+            StorageError: If the vector contains non-finite values.
+        """
+        extras: dict[str, Any] = {}
+        if vector is not None:
+            if not all(math.isfinite(component) for component in vector):
+                raise StorageError("Vector contains non-finite values (nan/inf); the DynamoDB N type rejects them.")
+            extras[self._vector_attribute] = {"L": [{"N": str(component)} for component in vector]}
+        if metadata is not None:
+            extras[_META_ATTR] = _marshal_meta(metadata)
+        effective_ttl = ttl_seconds if ttl_seconds is not None else self._ttl_seconds
+        if self._ttl_enabled and effective_ttl is not None:
+            extras[self._ttl_attribute] = {"N": str(int(time.time() + effective_ttl))}
+        return extras
+
+    def _encode_value(self, data: bytes) -> tuple[bytes, bool]:
+        """Return ``(payload, compressed)``: gzip is kept only when compression is on and it shrinks."""
+        if not self._compress:
+            return data, False
+        compressed = gzip.compress(data)
+        if len(compressed) < len(data):
+            return compressed, True
+        return data, False
+
+    def _document_item_port(self) -> _DocumentItemPort:
+        """Internal: the narrow view of this storage that :class:`LexicalIndex` writes through.
+
+        Not part of the public API. The index reaches base-table behaviour only through this
+        port, so it builds items with the same helpers as :meth:`write` and never touches other
+        private members of the storage.
+        """
+        return _DocumentItemPort(self)
+
+    def _locate(self, key: str) -> _DocumentLocation:
+        """Normalize ``key`` and resolve its full stored key and base-table primary key.
+
+        Raises:
+            StorageError: If the key is invalid.
+        """
+        normalized = normalize_key(key)
+        doc_id = f"{self._prefix}{normalized}"
+        pk, sk = self._split(doc_id)
+        return _DocumentLocation(key=normalized, doc_id=doc_id, pk=pk, sk=sk)
+
+    def _inline_item(
+        self,
+        location: _DocumentLocation,
+        data: bytes,
+        *,
+        vector: Optional[builtins.list[float]] = None,
+        metadata: Optional[dict[str, _MetaValue]] = None,
+        ttl_seconds: Optional[int] = None,
+    ) -> dict[str, Any]:
+        """Build the item :meth:`write` would store for an inline value, with the same extras and encoding.
+
+        Indexed documents must stay inline so the lexical transaction writes them atomically, so a
+        value that would need S3 offload is rejected even when a bucket is configured.
+
+        Raises:
+            StorageError: If the vector is non-finite or the encoded payload is above the inline threshold.
+        """
+        extras = self._item_extras(vector, metadata, ttl_seconds)
+        payload, compressed = self._encode_value(data)
+        if compressed:
+            extras[_Z_ATTR] = {"BOOL": True}
+        if len(payload) > _OFFLOAD_THRESHOLD_BYTES:
+            raise StorageError(
+                f"Value for '{location.key}' is {len(payload)} bytes, above the {_OFFLOAD_THRESHOLD_BYTES}-byte "
+                "inline limit; S3 offload is not supported for indexed documents"
+            )
+        return {
+            _PK: {"S": location.pk},
+            _SK: {"S": location.sk},
+            _KEY_ATTR: {"S": location.doc_id},
+            _DATA_ATTR: {"B": payload},
+            **extras,
+        }
+
+    async def _reclaim_offloaded(self, full_key: str) -> None:
+        """Best-effort delete of the offloaded S3 object of ``full_key``; a no-op without a bucket.
+
+        Never raises: the DynamoDB write it follows is already durable, so a failed cleanup must
+        not fail it. An S3 lifecycle rule is the backstop for missed reclamations.
+        """
+        if not self._s3_bucket:
+            return
+        with contextlib.suppress(Exception):
+            await self._s3_delete(full_key)
+
+    def _is_ttl_expired(self, item: dict[str, Any]) -> bool:
+        """True when this storage opted in to TTL and the item's stamp is at or before now."""
+        return self._ttl_enabled and self._is_expired(item)
 
     def _split(self, full_key: str) -> tuple[str, str]:
         """Split a full key into (partition key, sort key)."""

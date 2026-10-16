@@ -81,6 +81,21 @@ export type VectorSearchAdapter = (params: {
   filter?: Record<string, string | number | boolean>
 }) => Promise<Array<{ key: string; score: number; metadata?: Record<string, unknown>; expireAt?: number }>>
 
+/**
+ * Text search strategy that {@link DynamoDBStorage} delegates plain-string `search()` calls to, following the SDK
+ * backends' pattern. Structurally compatible with the SDK `SearchStrategy` (declared here so this package does not
+ * depend on SDK versions that ship it), so an SDK strategy can be configured as is.
+ *
+ * `index`, when present, runs after every successful `write()` with the normalized key (relative to the storage
+ * prefix), the written bytes and the write's options. It is a second step after the write, not atomic with it.
+ */
+export interface StringSearchStrategy {
+  /** Returns the best matches for a natural-language `query` over `storage`, best first. */
+  search(storage: Storage, query: string): Promise<Array<Pick<SearchResult, 'key' | 'score' | 'data'>>>
+  /** Indexes the value `storage` has just written under `key`. */
+  index?(storage: Storage, key: string, data: Uint8Array, options?: DocumentItemOptions): Promise<void>
+}
+
 /** Configuration for {@link DynamoDBStorage}. */
 export interface DynamoDBStorageConfig {
   /** AWS region override. Ignored when `client` is supplied. */
@@ -127,21 +142,96 @@ export interface DynamoDBStorageConfig {
   vectorAttribute?: string
   /** Optional override of the native `SearchVectors` call (testing, custom routing). When unset, `search()` calls DynamoDB natively. */
   vectorSearch?: VectorSearchAdapter
+  /**
+   * Optional text search strategy, such as `LexicalSearchStrategy`: plain-string `search()` calls delegate to it,
+   * and its `index` hook, when present, runs after every successful `write()`. Namespaced views inherit it.
+   */
+  searchStrategy?: StringSearchStrategy
 }
 
-/** Attribute names for the single-table layout. */
+/**
+ * Where a document lives: its normalized key relative to the storage prefix, its canonical id
+ * (prefix + key), and the base-table partition and sort keys derived from that id.
+ *
+ * @internal
+ */
+export interface DocumentLocation {
+  key: string
+  docId: string
+  pk: string
+  sk: string
+}
+
+/**
+ * Optional attributes of a document item, as accepted by {@link DynamoDBStorage.write} and forwarded to a
+ * {@link StringSearchStrategy.index} hook.
+ */
+export interface DocumentItemOptions {
+  /** Embedding for the native vector index; stored inline even when the value is offloaded. */
+  vector?: number[]
+  /** Metadata stored on the item; returned by and filterable in `search()`. */
+  metadata?: Record<string, string | number | boolean>
+  /** Per-write TTL; honoured only when the storage opted in to TTL. */
+  ttlSeconds?: number
+}
+
+/**
+ * Narrow view of a {@link DynamoDBStorage} used by the lexical index: the base-table facts and item
+ * helpers it needs, so the index never reaches into other storage internals. Not part of the public API.
+ *
+ * @internal
+ */
+export interface DocumentItemPort {
+  /** Base table name. */
+  readonly tableName: string
+  /** Storage prefix exactly as held (`'tenant/a/'` or `''`). */
+  readonly scope: string
+  /** TTL attribute name; set only when the storage opted in to TTL. */
+  readonly ttlAttribute: string | undefined
+  /** The storage's (lazily built) Document client. */
+  client(): Promise<import('@aws-sdk/lib-dynamodb').DynamoDBDocumentClient>
+  /** Normalizes `key` and derives its canonical id and base-table keys. */
+  locate(key: string): DocumentLocation
+  /** Strips the storage prefix from a canonical id, or returns `null` when the id is outside this storage. */
+  relativeKey(docId: string): string | null
+  /** True when this storage opted in to TTL and the item carries a TTL stamp at or before now. */
+  isExpired(item: Record<string, unknown>): boolean
+  /**
+   * Builds the inline base item exactly as `write()` would.
+   *
+   * @throws {@link StorageError} when the encoded value would need S3 offload, which indexed documents do not support
+   */
+  inlineItem(
+    location: DocumentLocation,
+    data: Uint8Array,
+    options?: DocumentItemOptions
+  ): Promise<Record<string, unknown>>
+  /** Best-effort delete of the offloaded S3 object of `docId`; a no-op without a bucket; never throws. */
+  deleteOffloaded(docId: string): Promise<void>
+}
+
 /** User-Agent marker attributing this package's AWS traffic (self-built clients only). */
 const USER_AGENT_MARKER = 'strands-dynamodb-storage'
 
-const PK = 'pk'
-const SK = 'sk'
-const KEY_ATTR = 'k'
-const DATA_ATTR = 'data'
-const S3_ATTR = 's3'
-const META_ATTR = 'meta'
-const Z_ATTR = 'z'
+/**
+ * Attribute names for the single-table layout. Shared with the lexical index, which writes the same
+ * base items; not part of the public API.
+ *
+ * @internal
+ */
+export const PK = 'pk'
+export const SK = 'sk'
+export const KEY_ATTR = 'k'
+export const DATA_ATTR = 'data'
+export const S3_ATTR = 's3'
+export const META_ATTR = 'meta'
+export const Z_ATTR = 'z'
 /** Service maximum for SearchVectors TopK ("must be between 1 and 100 inclusive"). */
 const MAX_TOP_K = 100
+const TEXT_QUERY_WITHOUT_STRATEGY_MESSAGE =
+  'DynamoDBStorage.search requires a SearchQuery with a pre-computed embedding vector. ' +
+  'Plain-string queries are not supported without a searchStrategy: embed the text first and pass { vector, topK }, ' +
+  'or configure a searchStrategy (for example LexicalSearchStrategy).'
 /** Over-fetch factor for client-side metadata filtering, capped at MAX_TOP_K. */
 const FILTER_OVERFETCH = 10
 
@@ -185,6 +275,7 @@ export class DynamoDBStorage implements Storage<string | DynamoDBListQuery> {
   private readonly _indexName: string
   private readonly _vectorAttribute: string
   private readonly _vectorSearch: VectorSearchAdapter | undefined
+  private readonly _searchStrategy: StringSearchStrategy | undefined
   private readonly _compress: boolean
   private readonly _ttlSeconds: number | undefined
   private readonly _ttlEnabled: boolean
@@ -211,6 +302,7 @@ export class DynamoDBStorage implements Storage<string | DynamoDBListQuery> {
     this._indexName = config?.indexName ?? 'vector_index'
     this._vectorAttribute = config?.vectorAttribute ?? 'vector'
     this._vectorSearch = config?.vectorSearch
+    this._searchStrategy = config?.searchStrategy
     this._compress = config?.compression === 'gzip'
     this._ttlSeconds = config?.ttlSeconds
     this._ttlEnabled = config?.ttlSeconds !== undefined
@@ -220,47 +312,20 @@ export class DynamoDBStorage implements Storage<string | DynamoDBListQuery> {
   /**
    * Stores `data` under `key`, overwriting any existing value. Values above the
    * item-size limit are offloaded to S3 when an `s3Bucket` is configured. An optional
-   * `vector` (kept inline for the native index) and `metadata` enable `search`.
+   * `vector` (kept inline for the native index) and `metadata` enable `search`. When the
+   * configured `searchStrategy` has an `index` hook, it runs after the write succeeds.
    *
    * @throws {@link StorageError} if the key is invalid, the value is oversized with
-   *   no S3 bucket configured, or the write fails
+   *   no S3 bucket configured, or the write fails; or, with the value already stored,
+   *   `Wrote '<key>' but indexing failed` (the hook's error is the cause)
    */
-  async write(
-    key: string,
-    data: Uint8Array,
-    options?: { vector?: number[]; metadata?: Record<string, string | number | boolean>; ttlSeconds?: number }
-  ): Promise<void> {
+  async write(key: string, data: Uint8Array, options?: DocumentItemOptions): Promise<void> {
     const normalized = normalizeKey(key)
     const full = `${this._prefix}${normalized}`
     const { pk, sk } = this._split(full)
-    const extra: Record<string, unknown> = {}
-    // The embedding stays inline in DynamoDB even when the payload is offloaded,
-    // because the native vector index can only index an on-item attribute.
-    if (options?.vector) {
-      // Mirror of the query-side check in search(): the service rejects
-      // non-finite values anyway, but as an opaque write failure.
-      if (!options.vector.every((v) => Number.isFinite(v))) {
-        throw new StorageError('Vector contains non-finite values (nan/inf); the DynamoDB N type rejects them.')
-      }
-      extra[this._vectorAttribute] = options.vector
-    }
-    if (options?.metadata) extra[META_ATTR] = options.metadata
-    const ttlSeconds = options?.ttlSeconds ?? this._ttlSeconds
-    if (this._ttlEnabled && ttlSeconds !== undefined) {
-      // Floor the whole stamp so a fractional ttlSeconds can't emit a fractional value.
-      extra[this._ttlAttribute] = Math.floor(Date.now() / 1000 + ttlSeconds)
-    }
-    // Compress before the size check so compressible values can stay inline (and out
-    // of S3). Keep the compressed form only when it actually shrinks, and record the
-    // choice per item so reads decompress correctly regardless of the current setting.
-    let payload: Uint8Array = data
-    if (this._compress) {
-      const gz = await gzipAsync(data)
-      if (gz.byteLength < data.byteLength) {
-        payload = gz
-        extra[Z_ATTR] = true
-      }
-    }
+    const extra = this._itemExtras(options)
+    const { payload, compressed } = await this._encodeValue(data)
+    if (compressed) extra[Z_ATTR] = true
     try {
       if (payload.byteLength > DynamoDBStorage.OFFLOAD_THRESHOLD_BYTES) {
         if (!this._s3Bucket) {
@@ -279,20 +344,13 @@ export class DynamoDBStorage implements Storage<string | DynamoDBListQuery> {
           { [PK]: pk, [SK]: sk, [KEY_ATTR]: full, [DATA_ATTR]: payload, ...extra },
           { returnOld: Boolean(this._s3Bucket) }
         )
-        if (old?.[S3_ATTR]) {
-          try {
-            await this._s3Delete(full)
-          } catch {
-            // Best-effort: the write itself is durable, so a failed cleanup must
-            // not fail it. An S3 lifecycle rule is the backstop for missed
-            // reclamations.
-          }
-        }
+        if (old?.[S3_ATTR]) await this._reclaimOffloaded(full)
       }
     } catch (error: unknown) {
       if (error instanceof StorageError) throw error
       throw new StorageError(`Failed to write '${normalized}' to DynamoDB table '${this._tableName}'`, { cause: error })
     }
+    await this._indexWritten(normalized, data, options)
   }
 
   /**
@@ -406,6 +464,7 @@ export class DynamoDBStorage implements Storage<string | DynamoDBListQuery> {
     if (this._s3Prefix) config.s3Prefix = this._s3Prefix
     if (this._s3Client) config.s3Client = this._s3Client
     if (this._vectorSearch) config.vectorSearch = this._vectorSearch
+    if (this._searchStrategy) config.searchStrategy = this._searchStrategy
     if (this._compress) config.compression = 'gzip'
     if (this._ttlSeconds !== undefined) config.ttlSeconds = this._ttlSeconds
     config.ttlAttribute = this._ttlAttribute
@@ -433,19 +492,15 @@ export class DynamoDBStorage implements Storage<string | DynamoDBListQuery> {
    * TTL attribute, or an adapter that does not return it) is kept. Expired matches are
    * not back-filled, so a search can return fewer than `topK` results.
    *
+   * A plain-string query (the SDK's natural-language form) is delegated to the configured
+   * `searchStrategy`; its matches come back as `{ key, score, data? }`, without metadata.
+   *
    * @throws {@link StorageError} if the search fails, `topK` is out of range, or the
-   *   query is a plain string — this store searches pre-computed embedding vectors and
-   *   does not embed text, so callers must supply a {@link SearchQuery}
+   *   query is a plain string and no `searchStrategy` is configured — this store searches
+   *   pre-computed embedding vectors and does not embed text
    */
   async search(query: SearchQuery | string): Promise<SearchResult[]> {
-    if (typeof query === 'string') {
-      // The Storage contract lets consumers pass a natural-language string; this
-      // store has no embedding model, so it cannot honour one.
-      throw new StorageError(
-        'DynamoDBStorage.search requires a SearchQuery with a pre-computed embedding vector. ' +
-          'Plain-string queries are not supported: embed the text first and pass { vector, topK }.'
-      )
-    }
+    if (typeof query === 'string') return this._searchText(query)
     if (query.pk !== undefined) this._assertPkInScope(query.pk)
     try {
       const matches: Array<{
@@ -486,8 +541,45 @@ export class DynamoDBStorage implements Storage<string | DynamoDBListQuery> {
       }
       return results
     } catch (error: unknown) {
-      if (error instanceof StorageError) throw error
-      throw new StorageError(`Failed to search DynamoDB table '${this._tableName}'`, { cause: error })
+      throw this._searchError(error)
+    }
+  }
+
+  /**
+   * Delegates a natural-language query to the configured search strategy. This store has no embedding model, so
+   * without a strategy it cannot honour one and rejects it.
+   */
+  private async _searchText(query: string): Promise<SearchResult[]> {
+    const strategy = this._searchStrategy
+    if (!strategy) throw new StorageError(TEXT_QUERY_WITHOUT_STRATEGY_MESSAGE)
+    try {
+      const matches = await strategy.search(this, query)
+      return matches.map(({ key, score, data }) => (data === undefined ? { key, score } : { key, score, data }))
+    } catch (error: unknown) {
+      throw this._searchError(error)
+    }
+  }
+
+  private _searchError(error: unknown): StorageError {
+    if (error instanceof StorageError) return error
+    return new StorageError(`Failed to search DynamoDB table '${this._tableName}'`, { cause: error })
+  }
+
+  /**
+   * Runs the search strategy's `index` hook after a successful write, as the SDK backends do. The value is already
+   * stored by then, so a failed hook is reported as an indexing failure (its error as the cause), not a failed write.
+   */
+  private async _indexWritten(key: string, data: Uint8Array, options: DocumentItemOptions | undefined): Promise<void> {
+    const strategy = this._searchStrategy
+    if (!strategy?.index) return
+    try {
+      await strategy.index(this, key, data, {
+        vector: options?.vector,
+        metadata: options?.metadata,
+        ttlSeconds: options?.ttlSeconds,
+      })
+    } catch (error: unknown) {
+      throw new StorageError(`Wrote '${key}' but indexing failed`, { cause: error })
     }
   }
 
@@ -586,9 +678,105 @@ export class DynamoDBStorage implements Storage<string | DynamoDBListQuery> {
     return Object.entries(filter).every(([k, v]) => metadata[k] === v)
   }
 
+  /**
+   * Returns the document item port the lexical index builds on. Internal: not part of the
+   * public API and may change without notice.
+   *
+   * @internal
+   */
+  _documentItemPort(): DocumentItemPort {
+    return {
+      tableName: this._tableName,
+      scope: this._prefix,
+      ttlAttribute: this._ttlEnabled ? this._ttlAttribute : undefined,
+      client: () => this._getClient(),
+      locate: (key) => this._locate(key),
+      relativeKey: (docId) => this._stripPrefix(docId),
+      isExpired: (item) => this._ttlEnabled && this._isExpired(item),
+      inlineItem: (location, data, options) => this._inlineItem(location, data, options),
+      deleteOffloaded: (docId) => this._reclaimOffloaded(docId),
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // Internals
   // ---------------------------------------------------------------------------
+
+  /**
+   * Optional attributes shared by every write path: the embedding, metadata, and TTL stamp.
+   *
+   * The embedding stays inline even when the payload is offloaded, because the native vector index
+   * can only index an on-item attribute; non-finite values are rejected up front (mirroring the
+   * query-side check in `search()`) instead of surfacing as an opaque write failure. The TTL stamp is
+   * written only when this instance opted in to TTL, and the whole stamp is floored so a fractional
+   * `ttlSeconds` cannot emit a fractional value.
+   */
+  private _itemExtras(options?: DocumentItemOptions): Record<string, unknown> {
+    const extra: Record<string, unknown> = {}
+    if (options?.vector) {
+      if (!options.vector.every((v) => Number.isFinite(v))) {
+        throw new StorageError('Vector contains non-finite values (nan/inf); the DynamoDB N type rejects them.')
+      }
+      extra[this._vectorAttribute] = options.vector
+    }
+    if (options?.metadata) extra[META_ATTR] = options.metadata
+    const ttlSeconds = options?.ttlSeconds ?? this._ttlSeconds
+    if (this._ttlEnabled && ttlSeconds !== undefined) {
+      extra[this._ttlAttribute] = Math.floor(Date.now() / 1000 + ttlSeconds)
+    }
+    return extra
+  }
+
+  /**
+   * Applies the configured compression to a value. Runs before the offload size check so
+   * compressible values can stay inline (and out of S3). The compressed form is kept only when it
+   * actually shrinks, and callers record the choice per item (`z`) so reads decompress correctly
+   * regardless of the current setting.
+   */
+  private async _encodeValue(data: Uint8Array): Promise<{ payload: Uint8Array; compressed: boolean }> {
+    if (!this._compress) return { payload: data, compressed: false }
+    const gz = await gzipAsync(data)
+    if (gz.byteLength < data.byteLength) return { payload: gz, compressed: true }
+    return { payload: data, compressed: false }
+  }
+
+  /** Normalizes a caller key and derives its canonical id and base-table keys. */
+  private _locate(key: string): DocumentLocation {
+    const normalized = normalizeKey(key)
+    const docId = `${this._prefix}${normalized}`
+    return { key: normalized, docId, ...this._split(docId) }
+  }
+
+  /**
+   * Builds the inline item `write()` would store for `data`, with the same extras and encoding.
+   * Indexed documents must stay inline so the lexical transaction can write them atomically, so a
+   * value that would need S3 offload is rejected even when a bucket is configured.
+   */
+  private async _inlineItem(
+    location: DocumentLocation,
+    data: Uint8Array,
+    options?: DocumentItemOptions
+  ): Promise<Record<string, unknown>> {
+    const extra = this._itemExtras(options)
+    const { payload, compressed } = await this._encodeValue(data)
+    if (compressed) extra[Z_ATTR] = true
+    if (payload.byteLength > DynamoDBStorage.OFFLOAD_THRESHOLD_BYTES) {
+      throw new StorageError(
+        `Value for '${location.key}' is ${payload.byteLength} bytes, above the ${DynamoDBStorage.OFFLOAD_THRESHOLD_BYTES}-byte inline limit; S3 offload is not supported for indexed documents`
+      )
+    }
+    return { [PK]: location.pk, [SK]: location.sk, [KEY_ATTR]: location.docId, [DATA_ATTR]: payload, ...extra }
+  }
+
+  /**
+   * Best-effort delete of the offloaded S3 object for `fullKey`; a no-op without a bucket. Never
+   * throws: the DynamoDB write it follows is already durable, so a failed cleanup must not fail it.
+   * An S3 lifecycle rule is the backstop for missed reclamations.
+   */
+  private async _reclaimOffloaded(fullKey: string): Promise<void> {
+    if (!this._s3Bucket) return
+    await this._s3Delete(fullKey).catch(() => undefined)
+  }
 
   /**
    * Splits a full key into partition and sort keys. The partition is the leading
