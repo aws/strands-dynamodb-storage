@@ -10,6 +10,9 @@
  * subsystem that persists bytes — with optional S3 offload for values above the
  * DynamoDB item limit and an optional native vector-search hook.
  *
+ * `DynamoDBMemoryStore` implements the SDK's `MemoryStore` for the Memory Manager on top
+ * of that vector search, embedding text with `BedrockEmbedder` or a function you supply.
+ *
  * @example
  * ```typescript
  * import { Agent, SessionManager } from '@strands-agents/sdk'
@@ -30,3 +33,13 @@ export type {
   SearchResult,
   VectorSearchAdapter,
 } from './dynamodb-storage.js'
+export { DynamoDBMemoryStore } from './memory-store.js'
+export type { DynamoDBMemoryStoreConfig } from './memory-store.js'
+export { BedrockEmbedder, DEFAULT_EMBEDDING_MODEL_ID } from './embedders.js'
+export type {
+  BedrockEmbedderConfig,
+  BedrockModelFamily,
+  Embedder,
+  EmbedFunction,
+  EmbeddingPurpose,
+} from './embedders.js'

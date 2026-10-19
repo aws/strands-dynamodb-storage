@@ -6,6 +6,10 @@
 Implements the SDK's unified byte ``Storage`` interface, so one DynamoDB-backed
 instance persists any subsystem's data (Session Manager, Memory Manager, offloader,
 transcripts) — with optional S3 offload, gzip compression, TTL, and native vector search.
+
+:class:`DynamoDBMemoryStore` implements the SDK's ``MemoryStore`` for the Memory Manager
+on top of that vector search, embedding text with :class:`BedrockEmbedder` or a function
+you supply.
 """
 
 from .dynamodb_storage import (
@@ -15,6 +19,15 @@ from .dynamodb_storage import (
     SearchResult,
     VectorSearchAdapter,
 )
+from .embedders import (
+    DEFAULT_EMBEDDING_MODEL_ID,
+    BedrockEmbedder,
+    BedrockModelFamily,
+    Embedder,
+    EmbeddingPurpose,
+    EmbedFunction,
+)
+from .memory_store import DynamoDBMemoryStore
 
 __all__ = [
     "DynamoDBStorage",
@@ -22,4 +35,11 @@ __all__ = [
     "SearchQuery",
     "SearchResult",
     "VectorSearchAdapter",
+    "DynamoDBMemoryStore",
+    "BedrockEmbedder",
+    "BedrockModelFamily",
+    "DEFAULT_EMBEDDING_MODEL_ID",
+    "Embedder",
+    "EmbedFunction",
+    "EmbeddingPurpose",
 ]

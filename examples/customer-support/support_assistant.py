@@ -17,7 +17,7 @@ which shares no words with the complaint. A follow-up run resumes the same
 ticket from the persisted session.
 
 Prerequisites: vector-indexed table (see README.md), Bedrock access for the
-agent model and Titan embeddings.
+agent model and Titan embeddings (the DynamoDBMemoryStore default embedder).
 
 Usage:
   python support_assistant.py --table agent-storage seed
@@ -28,16 +28,11 @@ Usage:
 
 import argparse
 import asyncio
-import json
-import uuid
-from typing import Any, Optional
 
-import boto3
 from strands import Agent
-from strands.memory import MemoryEntry, MemoryManager
-from strands.memory.types import Metadata, SearchOptions
+from strands.memory import MemoryManager
 from strands.session import SnapshotSessionManager
-from strands_dynamodb_storage import DynamoDBStorage, SearchQuery
+from strands_dynamodb_storage import DynamoDBMemoryStore, DynamoDBStorage
 
 CUSTOMER = "customer/acme"
 TICKET_SESSION = "ticket-7341"
@@ -55,72 +50,27 @@ SYSTEM_PROMPT = (
 )
 
 
-def make_embedder(region: str) -> Any:
-    bedrock = boto3.client("bedrock-runtime", region_name=region)
-
-    def embed(text: str) -> list[float]:
-        response = bedrock.invoke_model(
-            modelId="amazon.titan-embed-text-v2:0",
-            body=json.dumps({"inputText": text, "dimensions": 1024}),
-        )
-        return json.loads(response["body"].read())["embedding"]  # type: ignore[no-any-return]
-
-    return embed
-
-
-class DynamoDBMemoryStore:
-    """Adapts DynamoDBStorage vector search to the Strands MemoryStore protocol."""
-
-    def __init__(self, storage: DynamoDBStorage, partition: str, embed: Any) -> None:
-        self.storage = storage
-        self.partition = partition
-        self.embed = embed
-        self.name = "account-memory"
-        self.description = "This customer's account facts and history, searched by meaning"
-        self.max_search_results = 3
-        self.writable = True
-        self.extraction = None
-
-    async def add(self, content: str, metadata: Optional[Metadata] = None) -> None:
-        await self.storage.write(
-            f"memories/{uuid.uuid4().hex[:8]}",
-            content.encode(),
-            vector=self.embed(content),
-            metadata=metadata,
-        )
-
-    async def search(self, query: str, options: Optional[SearchOptions] = None) -> list[MemoryEntry]:
-        results = await self.storage.search(
-            SearchQuery(
-                vector=self.embed(query),
-                top_k=self.max_search_results,
-                pk=self.partition,
-                include_values=True,
-            )
-        )
-        return [
-            MemoryEntry(content=r.data.decode(), metadata=r.metadata)
-            for r in results
-            if r.data is not None
-        ]
+def build_memory_store(storage: DynamoDBStorage) -> DynamoDBMemoryStore:
+    return DynamoDBMemoryStore(
+        storage,
+        name="account-memory",
+        description="This customer's account facts and history, searched by meaning",
+        max_search_results=3,
+    )
 
 
 def build_agent(table: str, region: str) -> Agent:
     """One storage instance carries the whole assistant for this customer."""
     storage = DynamoDBStorage(table, region_name=region, prefix=CUSTOMER)
-    store = DynamoDBMemoryStore(storage, partition=CUSTOMER, embed=make_embedder(region))
-    # MemoryStore's optional methods are detected at runtime by the manager,
-    # but mypy requires them structurally.
-    memory = MemoryManager(stores=[store], add_tool_config=True)  # type: ignore[list-item]
+    memory = MemoryManager(stores=[build_memory_store(storage)], add_tool_config=True)
     session = SnapshotSessionManager(TICKET_SESSION, storage=storage)
     return Agent(system_prompt=SYSTEM_PROMPT, session_manager=session, memory_manager=memory)
 
 
 async def seed(table: str, region: str) -> None:
-    storage = DynamoDBStorage(table, region_name=region, prefix=CUSTOMER)
-    store = DynamoDBMemoryStore(storage, partition=CUSTOMER, embed=make_embedder(region))
+    store = build_memory_store(DynamoDBStorage(table, region_name=region, prefix=CUSTOMER))
     for fact in ACCOUNT_FACTS:
-        await store.add(fact, metadata={"kind": "account-fact"})
+        await store.add(fact, {"kind": "account-fact"})
         print(f"stored: {fact}")
 
 

@@ -2,14 +2,11 @@
 
 Session persistence gets a conversation through a restart. This example covers
 the other half: recalling something a user said weeks ago, in a new
-conversation that shares no keys or words with the old one. Memories are
-embedded on write, stored with a vector alongside the bytes, and recalled with
-a DynamoDB vector index search scoped to the user's partition.
-
-The ``DynamoDBMemoryStore`` class here is application code: the package ships
-the storage contract and vector search, and this bridge adapts them to the
-Strands SDK's ``MemoryStore`` protocol so the Memory Manager can pull relevant
-memories into the model input before each call.
+conversation that shares no keys or words with the old one. DynamoDBMemoryStore
+embeds each memory with Amazon Titan Text Embeddings V2, stores it with its
+vector on the table, and recalls it with a vector index search scoped to the
+user's partition, so the Memory Manager can pull relevant memories into the
+model input before each call.
 
 Prerequisites:
   - A DynamoDB table with a vector index (see README.md; 1024 dims, COSINE).
@@ -24,17 +21,12 @@ Usage:
 
 import argparse
 import asyncio
-import json
-import uuid
-from typing import Any, Optional
 
-import boto3
 from strands import Agent
-from strands.memory import MemoryEntry, MemoryManager
-from strands.memory.types import Metadata, SearchOptions
-from strands_dynamodb_storage import DynamoDBStorage, SearchQuery
+from strands.memory import MemoryManager
+from strands_dynamodb_storage import DynamoDBMemoryStore, DynamoDBStorage
 
-USER_PARTITION = "user/u1"
+USER_NAMESPACE = "user/u1"
 
 SEED_MEMORIES = [
     "Prefers window seats on long flights",
@@ -43,72 +35,20 @@ SEED_MEMORIES = [
 ]
 
 
-def make_embedder(region: str) -> Any:
-    """Return an embed(text) -> list[float] callable backed by Titan V2 (1024 dims)."""
-    bedrock = boto3.client("bedrock-runtime", region_name=region)
-
-    def embed(text: str) -> list[float]:
-        response = bedrock.invoke_model(
-            modelId="amazon.titan-embed-text-v2:0",
-            body=json.dumps({"inputText": text, "dimensions": 1024}),
-        )
-        return json.loads(response["body"].read())["embedding"]  # type: ignore[no-any-return]
-
-    return embed
-
-
-class DynamoDBMemoryStore:
-    """Adapts DynamoDBStorage vector search to the Strands MemoryStore protocol."""
-
-    def __init__(self, storage: DynamoDBStorage, partition: str, embed: Any) -> None:
-        self.storage = storage
-        self.partition = partition
-        self.embed = embed
-        self.name = "dynamodb"
-        self.description = "Long-term memories in DynamoDB, searched by meaning"
-        self.max_search_results = 3
-        self.writable = True
-        self.extraction = None
-
-    async def add(self, content: str, metadata: Optional[Metadata] = None) -> None:
-        await self.storage.write(
-            f"memories/{uuid.uuid4().hex[:8]}",
-            content.encode(),
-            vector=self.embed(content),
-            metadata=metadata,
-        )
-
-    async def search(self, query: str, options: Optional[SearchOptions] = None) -> list[MemoryEntry]:
-        results = await self.storage.search(
-            SearchQuery(
-                vector=self.embed(query),
-                top_k=self.max_search_results,
-                pk=self.partition,
-                include_values=True,
-            )
-        )
-        return [
-            MemoryEntry(content=r.data.decode(), metadata=r.metadata)
-            for r in results
-            if r.data is not None
-        ]
-
-
 def build_store(table: str, region: str) -> DynamoDBMemoryStore:
-    storage = DynamoDBStorage(table, region_name=region, prefix=USER_PARTITION)
-    return DynamoDBMemoryStore(storage, partition=USER_PARTITION, embed=make_embedder(region))
+    """One memory store per user: the namespace keeps every user's memories in their own partition."""
+    storage = DynamoDBStorage(table, region_name=region).namespace(USER_NAMESPACE)
+    return DynamoDBMemoryStore(storage, max_search_results=3)
 
 
 async def seed(store: DynamoDBMemoryStore) -> None:
     for memory in SEED_MEMORIES:
-        await store.add(memory, metadata={"kind": "preference"})
-        print(f"stored: {memory}")
+        key = await store.add(memory, {"kind": "preference"})
+        print(f"stored: {memory} ({key})")
 
 
 def ask(store: DynamoDBMemoryStore, question: str) -> None:
-    # MemoryStore's optional methods (add_messages, initialize, get_tools) are
-    # detected at runtime by the manager, but mypy requires them structurally.
-    memory = MemoryManager(stores=[store], add_tool_config=True)  # type: ignore[list-item]
+    memory = MemoryManager(stores=[store], add_tool_config=True)
     agent = Agent(memory_manager=memory)
     agent(question)
 

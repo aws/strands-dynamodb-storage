@@ -126,6 +126,24 @@ def _marshal_meta(meta: dict[str, _MetaValue]) -> dict[str, Any]:
     return {"M": out}
 
 
+_USER_AGENT_MARKER = "strands-dynamodb-storage"
+
+
+def _client_config(config: Any) -> Any:
+    """Return a botocore ``Config`` carrying this package's user-agent marker.
+
+    Shared by every AWS client the package creates. A caller-supplied
+    ``user_agent_extra`` is left as it is.
+    """
+    from botocore.config import Config
+
+    if config is None:
+        return Config(user_agent_extra=_USER_AGENT_MARKER)
+    if not getattr(config, "user_agent_extra", None):
+        return config.merge(Config(user_agent_extra=_USER_AGENT_MARKER))
+    return config
+
+
 class DynamoDBStorage:
     """DynamoDB ``Storage`` backend (single-table design).
 
@@ -411,7 +429,19 @@ class DynamoDBStorage:
             kwargs["boto_client_config"] = self._boto_client_config
         return DynamoDBStorage(self._table_name, **kwargs)
 
-    async def search(self, query: SearchQuery) -> builtins.list[SearchResult]:
+    def partition_key(self, key: str) -> str:
+        """Return the partition key (``pk``) that ``key`` is stored under.
+
+        The namespace prefix is applied first, the same way :meth:`write` applies it,
+        so the result can be passed as :attr:`SearchQuery.pk` to pin a vector search
+        to the partition that holds ``key``.
+
+        Raises:
+            StorageError: If the key is empty or contains a ``..`` segment.
+        """
+        return self._split(f"{self._prefix}{normalize_key(key)}")[0]
+
+    async def search(self, query: Union[SearchQuery, str]) -> builtins.list[SearchResult]:
         """Nearest-neighbour vector search over items written with a ``vector``.
 
         Optional part of the ``Storage`` contract — consumers feature-detect
@@ -433,9 +463,32 @@ class DynamoDBStorage:
         does not return it) is kept. Expired matches are not back-filled, so a
         search can return fewer than ``top_k`` results.
 
+        This store does not embed text. A plain-string query, which the SDK's
+        ``Storage`` contract allows, is rejected: use :class:`DynamoDBMemoryStore`
+        for text search, or embed the text and pass a :class:`SearchQuery`.
+
         Raises:
-            StorageError: If the search fails or ``top_k`` is out of range.
+            StorageError: If the query is a plain string, the search fails, or
+                ``top_k`` is out of range.
         """
+        return await self._search(query)
+
+    async def _search(
+        self, query: Union[SearchQuery, str], key_prefix: Optional[str] = None
+    ) -> builtins.list[SearchResult]:
+        """:meth:`search`, keeping only keys that start with ``key_prefix``.
+
+        ``key_prefix`` is relative to this storage's namespace. Other keys are
+        dropped before their values are read, so an offloaded or unprojected match
+        that the caller would discard costs no point read. Used by
+        :class:`DynamoDBMemoryStore`, which shares its partition with other items.
+        """
+        if isinstance(query, str):
+            raise StorageError(
+                "DynamoDBStorage.search requires a SearchQuery with a pre-computed embedding vector. "
+                "Plain-string queries are not supported: embed the text first and pass "
+                "SearchQuery(vector=..., top_k=...), or use DynamoDBMemoryStore, which embeds text for you."
+            )
         if query.pk is not None:
             self._assert_pk_in_scope(query.pk)
         try:
@@ -461,6 +514,8 @@ class DynamoDBStorage:
                 # a foreign key would otherwise be handed back looking like one of ours.
                 key = self._strip_prefix(match["key"])
                 if key is None:
+                    continue
+                if key_prefix is not None and not key.startswith(key_prefix):
                     continue
                 if self._ttl_enabled and self._has_passed(match.get("expire_at")):
                     continue
@@ -746,14 +801,22 @@ class DynamoDBStorage:
         await asyncio.to_thread(client.delete_object, Bucket=self._s3_bucket, Key=self._s3_key(full_key))
 
     def _make_config(self) -> Any:
-        from botocore.config import Config
+        return _client_config(self._boto_client_config)
 
-        config = self._boto_client_config
-        if config is None:
-            return Config(user_agent_extra="strands-dynamodb-storage")
-        if not getattr(config, "user_agent_extra", None):
-            return config.merge(Config(user_agent_extra="strands-dynamodb-storage"))
-        return config
+    def _aws_defaults(self) -> tuple[Optional[str], Any, Any]:
+        """Region, boto3 session, and botocore config for clients created alongside this instance.
+
+        The region is resolved the way :meth:`_get_client` resolves it: an injected (or
+        already created) client's region, else the ``boto_session``'s, else
+        ``region_name``. ``None`` means the default boto3 resolution.
+        """
+        if self._client is not None:
+            region = getattr(getattr(self._client, "meta", None), "region_name", None)
+        elif self._boto_session is not None:
+            region = self._boto_session.region_name
+        else:
+            region = self._region_name
+        return region, self._boto_session, self._boto_client_config
 
     def _session(self) -> Any:
         import boto3

@@ -27,14 +27,10 @@
  *   npx tsx support-assistant.ts --table agent-storage ticket "Thanks. What did we conclude?"
  */
 
-import { randomUUID } from 'node:crypto'
 import { parseArgs } from 'node:util'
 
-import { BedrockRuntimeClient, InvokeModelCommand } from '@aws-sdk/client-bedrock-runtime'
 import { Agent, MemoryManager, SessionManager } from '@strands-agents/sdk'
-import type { JSONValue, MemoryEntry, MemoryStore, SearchOptions } from '@strands-agents/sdk'
-import { DynamoDBStorage } from 'strands-dynamodb-storage'
-import type { SearchQuery } from 'strands-dynamodb-storage'
+import { DynamoDBMemoryStore, DynamoDBStorage } from 'strands-dynamodb-storage'
 
 const CUSTOMER = 'customer/acme'
 const TICKET_SESSION = 'ticket-7341'
@@ -50,84 +46,24 @@ const SYSTEM_PROMPT =
   'account memories when they are relevant to the reported symptom, and say ' +
   'which remembered fact you are basing your answer on.'
 
-type Embedder = (text: string) => Promise<number[]>
-
-function makeEmbedder(region: string): Embedder {
-  const bedrock = new BedrockRuntimeClient({ region })
-
-  return async (text: string): Promise<number[]> => {
-    const response = await bedrock.send(
-      new InvokeModelCommand({
-        modelId: 'amazon.titan-embed-text-v2:0',
-        body: JSON.stringify({ inputText: text, dimensions: 1024 }),
-      }),
-    )
-    const parsed = JSON.parse(new TextDecoder().decode(response.body)) as { embedding: number[] }
-    return parsed.embedding
-  }
-}
-
-/** Adapts DynamoDBStorage vector search to the Strands MemoryStore interface. */
-class DynamoDBMemoryStore implements MemoryStore {
-  readonly name = 'account-memory'
-  readonly description = "This customer's account facts and history, searched by meaning"
-  readonly maxSearchResults = 3
-  readonly writable = true
-
-  constructor(
-    private readonly storage: DynamoDBStorage,
-    private readonly partition: string,
-    private readonly embed: Embedder,
-  ) {}
-
-  async add(content: string, metadata?: Record<string, JSONValue>): Promise<void> {
-    // The storage backend indexes flat primitive metadata; keep those entries.
-    const flat: Record<string, string | number | boolean> = {}
-    for (const [key, value] of Object.entries(metadata ?? {})) {
-      if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
-        flat[key] = value
-      }
-    }
-    await this.storage.write(
-      `memories/${randomUUID().replaceAll('-', '').slice(0, 8)}`,
-      new TextEncoder().encode(content),
-      { vector: await this.embed(content), metadata: flat },
-    )
-  }
-
-  async search(query: string, _options?: SearchOptions): Promise<MemoryEntry[]> {
-    const searchQuery: SearchQuery = {
-      vector: await this.embed(query),
-      topK: this.maxSearchResults,
-      pk: this.partition,
-      includeValues: true,
-    }
-    const results = await this.storage.search(searchQuery)
-    return results.flatMap((r) =>
-      r.data === undefined
-        ? []
-        : [
-            {
-              content: new TextDecoder().decode(r.data),
-              metadata: r.metadata as Record<string, JSONValue> | undefined,
-            },
-          ],
-    )
-  }
+function buildMemoryStore(storage: DynamoDBStorage): DynamoDBMemoryStore {
+  return new DynamoDBMemoryStore(storage, {
+    name: 'account-memory',
+    description: "This customer's account facts and history, searched by meaning",
+    maxSearchResults: 3,
+  })
 }
 
 /** One storage instance carries the whole assistant for this customer. */
 function buildAgent(table: string, region: string): Agent {
   const storage = new DynamoDBStorage(table, { region, prefix: CUSTOMER })
-  const store = new DynamoDBMemoryStore(storage, CUSTOMER, makeEmbedder(region))
-  const memory = new MemoryManager({ stores: [store], addToolConfig: true })
+  const memory = new MemoryManager({ stores: [buildMemoryStore(storage)], addToolConfig: true })
   const session = new SessionManager({ sessionId: TICKET_SESSION, storage })
   return new Agent({ systemPrompt: SYSTEM_PROMPT, sessionManager: session, memoryManager: memory })
 }
 
 async function seed(table: string, region: string): Promise<void> {
-  const storage = new DynamoDBStorage(table, { region, prefix: CUSTOMER })
-  const store = new DynamoDBMemoryStore(storage, CUSTOMER, makeEmbedder(region))
+  const store = buildMemoryStore(new DynamoDBStorage(table, { region, prefix: CUSTOMER }))
   for (const fact of ACCOUNT_FACTS) {
     await store.add(fact, { kind: 'account-fact' })
     console.log(`stored: ${fact}`)
