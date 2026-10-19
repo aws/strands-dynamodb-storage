@@ -23,6 +23,7 @@
   <div align="center">
     <a href="https://github.com/aws/strands-dynamodb-storage/actions/workflows/ci-python.yml"><img alt="Python CI" src="https://github.com/aws/strands-dynamodb-storage/actions/workflows/ci-python.yml/badge.svg"/></a>
     <a href="https://github.com/aws/strands-dynamodb-storage/actions/workflows/ci-typescript.yml"><img alt="TypeScript CI" src="https://github.com/aws/strands-dynamodb-storage/actions/workflows/ci-typescript.yml/badge.svg"/></a>
+    <a href="https://codecov.io/gh/aws/strands-dynamodb-storage"><img alt="Coverage" src="https://codecov.io/gh/aws/strands-dynamodb-storage/graph/badge.svg"/></a>
     <a href="https://github.com/aws/strands-dynamodb-storage/blob/main/LICENSE"><img alt="License" src="https://img.shields.io/github/license/aws/strands-dynamodb-storage"/></a>
     <a href="https://pypi.org/project/strands-dynamodb-storage/"><img alt="PyPI version" src="https://img.shields.io/pypi/v/strands-dynamodb-storage"/></a>
     <a href="https://www.npmjs.com/package/strands-dynamodb-storage"><img alt="npm version" src="https://img.shields.io/npm/v/strands-dynamodb-storage"/></a>

@@ -1,0 +1,29 @@
+# Codecov configuration: https://docs.codecov.com/docs/codecov-yaml
+#
+# Each package uploads under its own flag. The CI workflows only run for the
+# package a change touches, so carryforward keeps the other package's last
+# report on the commit instead of counting it as missing.
+coverage:
+  status:
+    project:
+      default:
+        # Fail when total coverage drops more than one point below the base commit.
+        target: auto
+        threshold: 1%
+    patch:
+      default:
+        # Lines added or changed by a pull request must be at least 90% covered.
+        target: 90%
+
+flags:
+  python:
+    paths:
+      - python/src/
+    carryforward: true
+  typescript:
+    paths:
+      - typescript/src/
+    carryforward: true
+
+comment:
+  layout: 'condensed_header, diff, flags, files'
