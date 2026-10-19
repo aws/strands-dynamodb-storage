@@ -9,22 +9,19 @@ question time.
 
 ## How it works
 
-The package ships the storage contract and vector search
-(`write(vector=...)` and `search(SearchQuery)`); the Strands SDK's Memory
-Manager consumes anything implementing its `MemoryStore` protocol. The bridge
-between them is a small class you define in your own application, included
-here as `DynamoDBMemoryStore`:
+`DynamoDBMemoryStore` implements the Strands SDK's `MemoryStore` protocol, so
+the Memory Manager consumes it directly:
 
 - `add()` embeds the content (Amazon Titan Text Embeddings V2, 1024
-  dimensions) and writes bytes + vector + metadata in one call.
-- `search()` embeds the query and runs a vector index search scoped to the
-  user's partition, returning `MemoryEntry` values.
+  dimensions) and writes the text, vector, and metadata as one item.
+- `search()` embeds the query and runs one vector index search scoped to the
+  user's partition, returning `MemoryEntry` values closest first.
 
 Wiring it into the agent is one constructor argument:
 
 ```python
-memory = MemoryManager(stores=[DynamoDBMemoryStore(storage, partition="user/u1", embed=embed)],
-                       add_tool_config=True)
+storage = DynamoDBStorage("agent-storage", region_name="us-east-1").namespace("user/u1")
+memory = MemoryManager(stores=[DynamoDBMemoryStore(storage, max_search_results=3)], add_tool_config=True)
 agent = Agent(memory_manager=memory)
 ```
 
@@ -33,11 +30,14 @@ them into the model input, and `add_tool_config=True` registers an
 `add_memory` tool so the model can store new facts through the same table it
 recalls from.
 
-Notice the `pk` argument in `search()`. The vector index is partitioned the
-same way the table is, so every search is scoped to one partition: a user's
-search never ranges over another user's memories. The partition value is
-supplied by the caller, so this is query scoping rather than an authorization
-boundary; access control belongs in AWS IAM and your application layer.
+Notice the `namespace("user/u1")` call. The vector index is partitioned the
+same way the table is, on the first two segments of each key, and the memory
+store searches only the partition that holds its namespace (`user/u1`), so a
+user's search never ranges over another user's memories. Keep the user in the
+first two segments: `tenant/users/u1` and `tenant/users/u2` would share the
+partition `tenant/users`. The namespace is chosen by your application, so this is query
+scoping rather than an authorization boundary; access control belongs in AWS
+IAM and your application layer.
 
 ## Run it
 

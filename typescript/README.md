@@ -13,10 +13,14 @@ values, optional gzip compression, TTL, and optional **native vector search**.
 npm install strands-dynamodb-storage @strands-agents/sdk @aws-sdk/client-dynamodb @aws-sdk/lib-dynamodb
 # only if you enable S3 offload for values above the 400 KB item limit:
 npm install @aws-sdk/client-s3
+# for BedrockEmbedder (the DynamoDBMemoryStore default embedder); @strands-agents/sdk already
+# depends on it, so most installs have it, but strict installers need it declared:
+npm install @aws-sdk/client-bedrock-runtime
 ```
 
 The AWS SDK packages are **peer dependencies** and are lazy-loaded — if you never construct a `DynamoDBStorage`, you
-don't pay for them. `@aws-sdk/client-s3` is optional (needed only when `s3Bucket` is set).
+don't pay for them. `@aws-sdk/client-s3` is optional (needed only when `s3Bucket` is set), and so is
+`@aws-sdk/client-bedrock-runtime` (needed only for `BedrockEmbedder`).
 
 ## Table
 
@@ -30,7 +34,7 @@ aws dynamodb create-table --table-name agent-data \
 ```
 
 You own the table: the package never creates infrastructure and holds no `CreateTable` permission at runtime. TTL
-enablement and vector index creation are covered in [Provisioning and permissions](../#provisioning-and-permissions).
+enablement and vector index creation are covered in [Provisioning and permissions](https://github.com/aws/strands-dynamodb-storage#provisioning-and-permissions).
 
 ## Quick start — session persistence, zero custom code
 
@@ -126,17 +130,94 @@ adapter opts in by returning `expireAt` (epoch seconds) on each match. Expired m
 can return fewer than `topK` results, and an item whose TTL was just renewed can be briefly hidden until the index
 catches up with the write.
 
+## Long-term memory
+
+`DynamoDBMemoryStore` gives the Strands Memory Manager a long-term memory on the same table. It embeds each memory
+through Amazon Bedrock, stores the text with its embedding, and finds memories by meaning with one `SearchVectors` call.
+The table needs the vector index from [Provisioning and permissions](https://github.com/aws/strands-dynamodb-storage#provisioning-and-permissions), with
+`Dimensions` 1024 for the default embedder (Amazon Titan Text Embeddings V2).
+
+```ts
+import { Agent, MemoryManager } from '@strands-agents/sdk'
+import { DynamoDBMemoryStore, DynamoDBStorage } from 'strands-dynamodb-storage'
+
+const storage = new DynamoDBStorage('agent-storage', { region: 'us-east-1' }).namespace('user/u1')
+const memory = new DynamoDBMemoryStore(storage)
+const agent = new Agent({ memoryManager: new MemoryManager({ stores: [memory], addToolConfig: true }) })
+
+// The store also works on its own.
+const key = await memory.add('Prefers a window seat', { source: 'chat' })
+const entries = await memory.search('Where does the user like to sit?')
+entries[0]?.content // 'Prefers a window seat'
+entries[0]?.metadata // { source: 'chat', _key: 'memory/dynamodb/8b29884b...', _score: 0.59 }
+```
+
+How it behaves:
+
+- **One item per memory.** A memory is stored at `memory/<name>/<id>` inside the storage namespace, where `<name>` is
+  the store name (default `dynamodb`) and `<id>` is a hash of the text. Adding the same text again overwrites that item,
+  replacing its metadata, so retried writes do not create duplicates. `await storage.delete(entry.metadata?._key as string)`
+  removes a memory.
+- **Two calls per operation.** `add()` makes one Bedrock call and one `PutItem`; `search()` makes one Bedrock call and
+  one `SearchVectors`, pinned to the partition that holds the namespace. With the index projection `ALL`, memories come
+  back from the index, so a search reads no base-table items; a memory large enough to be offloaded to S3 costs one
+  `GetItem` and one S3 read. Results come closest first; `_score` is the raw index score (lower is closer for COSINE).
+- **One memory store per partition.** The partition is the first two segments of the full key: `namespace('user/u1')`
+  gives the store partition `user/u1`, but `user/u1/agent-a` and `user/u1/agent-b` share partition `user/u1`. Every item
+  with a vector in the partition competes for the same search results, and the store drops matches that are not its
+  own memories, so a second memory store (or the application's own vector items) in the partition can leave results
+  short of `maxSearchResults`. Give each memory store a two-segment namespace of its own, such as `user/<id>`.
+- **Only memories are embedded.** Session snapshots and other values written through the same storage never call
+  Bedrock.
+- **TTL applies.** With `ttlSeconds` on the storage, memories expire like any other item, and search drops expired
+  matches.
+- **Metadata** values that are strings, booleans, or numbers that are zero or from 1e-130 to `Number.MAX_SAFE_INTEGER`
+  in magnitude are kept, the same set the Python package accepts. Other values (arrays, nested objects, `null`, numbers
+  outside that range; the AWS SDK refuses to marshall larger ones), keys or strings containing a lone surrogate (which
+  DynamoDB stores as `?`), empty keys, the keys `__proto__` and `constructor` (which `marshall` cannot write), and the
+  reserved keys `_key` and `_score` are dropped with a `console.warn`, so a memory whose metadata came from a model's
+  extraction is still stored.
+
+The default embedder runs in the storage's Region and needs `bedrock:InvokeModel` on the model. When the storage was
+given a `client`, the embedder takes that client's Region but resolves its own credentials through the standard chain;
+pass `new BedrockEmbedder({ client })` to control them. To use another model,
+pass an embedder. `dimensions` must match the index's `Dimensions`; a mismatch fails the write or search with a
+`StorageError` whose cause names the expected and actual sizes:
+
+```ts
+import { BedrockEmbedder } from 'strands-dynamodb-storage'
+
+// Cohere Embed v4 through a cross-Region inference profile; Cohere embeds memories and queries with separate
+// input types.
+const cohere = new DynamoDBMemoryStore(storage, {
+  embedder: new BedrockEmbedder({ modelId: 'us.cohere.embed-v4:0', dimensions: 1024 }),
+})
+
+// Any other model: a function from text to an array of numbers (sync or async), or an object
+// with an `embed(text, purpose)` method (sync or async) where purpose is 'document' or 'query'.
+// Convert a Float32Array with Array.from.
+const custom = new DynamoDBMemoryStore(storage, { embedder: async (text) => Array.from(await myModel.embed(text)) })
+```
+
+`BedrockEmbedder` supports Titan Text Embeddings V2 (256, 512, or 1024 dimensions), Cohere Embed v3 English and
+multilingual (1024), and Cohere Embed v4 (256, 512, 1024, or 1536), by model ID, cross-Region inference profile ID, or
+ARN. An application inference profile or provisioned model ARN does not name the model, so pass its request format as
+well: `new BedrockEmbedder({ modelId: profileArn, modelFamily: 'amazon.titan-embed-text-v2' })`. Bedrock limits the
+input size. Titan Text Embeddings V2 rejects a text over 8,192 tokens or 50,000 characters, and Cohere Embed v3 a text
+over 2,048 characters; either fails with a `StorageError` that carries Bedrock's message. Cohere Embed v3 also embeds
+only the first 512 tokens of a text, without an error, so a long memory is found by its beginning. Cohere Embed v4
+accepts up to about 128,000 tokens per text.
+
 ## Semantic search — DynamoDB native vector index
 
-`search()` gives an agent semantic long-term memory over the same table: write each memory with its embedding, then
-query by meaning. It is an optional, feature-detected part of the `Storage` contract (`if (storage.search) { … }`).
-This store searches pre-computed embedding vectors and does not embed text: pass a `SearchQuery` with a `vector`, as
-every example does. A plain-string query is rejected with a `StorageError` at runtime, so a text-search consumer that
-expects the backend to embed for it must wrap this store with an embedding bridge rather than wiring it in directly.
+`search()` is the lower-level API under the memory store: write each item with its embedding, then query by vector.
+It is an optional, feature-detected part of the `Storage` contract (`if (storage.search) { … }`). The storage searches
+pre-computed embedding vectors and does not embed text: pass a `SearchQuery` with a `vector`, as every example does. A
+plain-string query is rejected with a `StorageError` at runtime; for text search, use `DynamoDBMemoryStore`.
 On DynamoDB the search runs against the **native vector
 index**, so nearest-neighbour scoring happens _in the database_ -- no second vector store, no ETL -- and because the index
 is partitioned on `pk`, every search is scoped to the caller's key space. Creating the table with a vector index (and the
-IAM permissions needed) is covered in the repository README's [Provisioning and permissions](../#provisioning-and-permissions).
+IAM permissions needed) is covered in the repository README's [Provisioning and permissions](https://github.com/aws/strands-dynamodb-storage#provisioning-and-permissions).
 
 Write an embedding alongside the bytes, then query:
 
@@ -159,7 +240,7 @@ await store.write('memory/u1/m1', new TextEncoder().encode('likes window seats')
 const results = await store.search({
   vector: queryEmbedding,
   topK: 5,
-  pk: 'memory/u1', // required when the index declares a HASH element
+  pk: store.partitionKey('memory/u1/m1'), // the partition holding these keys; required when the index declares a HASH element
   filter: { kind: 'preference' }, // optional metadata equality filter (applied client-side)
   includeValues: true, // hydrate each match's stored bytes
 })
@@ -220,22 +301,30 @@ The adapter is purely an override: with none configured, `search()` issues the n
 }
 ```
 
-(The S3 statement is only needed when `s3Bucket` is configured. Semantic `search()` additionally needs
-`dynamodb:SearchVectors` on the table and its indexes:)
+(The S3 statement is only needed when `s3Bucket` is configured. Semantic `search()` and `DynamoDBMemoryStore`
+additionally need `dynamodb:SearchVectors` on the table and its indexes, and the memory store's default embedder needs
+`bedrock:InvokeModel` on the Titan Text Embeddings V2 model:)
 
 ```json
-{
-  "Effect": "Allow",
-  "Action": "dynamodb:SearchVectors",
-  "Resource": [
-    "arn:aws:dynamodb:us-east-1:ACCOUNT:table/agent-data",
-    "arn:aws:dynamodb:us-east-1:ACCOUNT:table/agent-data/index/*"
-  ]
-}
+[
+  {
+    "Effect": "Allow",
+    "Action": "dynamodb:SearchVectors",
+    "Resource": [
+      "arn:aws:dynamodb:us-east-1:ACCOUNT:table/agent-data",
+      "arn:aws:dynamodb:us-east-1:ACCOUNT:table/agent-data/index/*"
+    ]
+  },
+  {
+    "Effect": "Allow",
+    "Action": "bedrock:InvokeModel",
+    "Resource": "arn:aws:bedrock:us-east-1::foundation-model/amazon.titan-embed-text-v2:0"
+  }
+]
 ```
 
 The full provisioning story (TTL enablement, vector index creation, and the complete least-privilege policy) is in the
-repository README's [Provisioning and permissions](../#provisioning-and-permissions).
+repository README's [Provisioning and permissions](https://github.com/aws/strands-dynamodb-storage#provisioning-and-permissions).
 
 ## Examples
 

@@ -98,6 +98,29 @@ const agent = new Agent({
 
 To scope a single subsystem to a different store instead, pass `storage` on that subsystem directly, as the per-language Quick Starts below show.
 
+### Long-term memory
+
+`DynamoDBMemoryStore` plugs into the Memory Manager. It embeds each memory through [Amazon Bedrock](https://aws.amazon.com/bedrock/) (Amazon Titan Text Embeddings V2 by default), stores it on the same table, and finds memories by meaning with one vector search. The table needs the vector index from [Provisioning and permissions](#provisioning-and-permissions).
+
+```python
+from strands import Agent
+from strands.memory import MemoryManager
+from strands_dynamodb_storage import DynamoDBMemoryStore, DynamoDBStorage
+
+storage = DynamoDBStorage("agent-storage", region_name="us-east-1").namespace("user/u1")
+agent = Agent(memory_manager=MemoryManager(stores=[DynamoDBMemoryStore(storage)]))
+```
+
+```typescript
+import { Agent, MemoryManager } from '@strands-agents/sdk'
+import { DynamoDBMemoryStore, DynamoDBStorage } from 'strands-dynamodb-storage'
+
+const storage = new DynamoDBStorage('agent-storage', { region: 'us-east-1' }).namespace('user/u1')
+const agent = new Agent({ memoryManager: new MemoryManager({ stores: [new DynamoDBMemoryStore(storage)] }) })
+```
+
+Only the memory store calls Bedrock: session snapshots and other values written through the same storage are never embedded. The per-language READMEs cover the item layout, other embedding models, and a custom embed function.
+
 ### Python
 
 Requires Python 3.10+:
@@ -203,7 +226,7 @@ aws dynamodb update-time-to-live \
   --time-to-live-specification "Enabled=true, AttributeName=expireAt"
 ```
 
-**Semantic search (optional).** `search()` runs against a DynamoDB vector index on the same table. The index is created with the table (its name, dimensions, and distance function are immutable afterwards), so size `Dimensions` to your embedding model:
+**Semantic search and long-term memory (optional).** `search()` and `DynamoDBMemoryStore` run against a DynamoDB vector index on the same table. The index is created with the table (its name, dimensions, and distance function are immutable afterwards), so size `Dimensions` to your embedding model; 1024 matches the memory store's default embedder:
 
 ```bash
 aws dynamodb create-table \
@@ -251,12 +274,18 @@ The `SearchSchema` HASH element on `pk` partitions the index the same way the ta
       "Effect": "Allow",
       "Action": ["s3:PutObject", "s3:GetObject", "s3:DeleteObject"],
       "Resource": "arn:aws:s3:::my-offload-bucket/*"
+    },
+    {
+      "Sid": "MemoryStoreEmbeddingsOptional",
+      "Effect": "Allow",
+      "Action": "bedrock:InvokeModel",
+      "Resource": "arn:aws:bedrock:us-east-1::foundation-model/amazon.titan-embed-text-v2:0"
     }
   ]
 }
 ```
 
-Drop the optional statements for features you don't use. Nothing else is required: no `DescribeTable`, no `Scan`, no table-level wildcards, and credentials resolve through the standard SDK chain (environment, instance profile, or an injected client).
+Drop the optional statements for features you don't use. `DynamoDBMemoryStore` needs both `SemanticSearchOptional` and `MemoryStoreEmbeddingsOptional`; with another embedding model, name that model instead. A geographic cross-Region inference profile such as `us.cohere.embed-v4:0` needs the profile and the model in each Region it routes to, as the [Bedrock inference profile prerequisites](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-prereq.html) describe. A global profile such as `global.cohere.embed-v4:0` also needs the model ARN without a Region (`arn:aws:bedrock:::foundation-model/cohere.embed-v4:0`), as [global cross-Region inference](https://docs.aws.amazon.com/bedrock/latest/userguide/global-cross-region-inference.html) describes. Nothing else is required: no `DescribeTable`, no `Scan`, no table-level wildcards, and credentials resolve through the standard SDK chain (environment, instance profile, or an injected client).
 
 ## Features
 
@@ -266,9 +295,10 @@ Both languages ship the same capabilities with identical semantics.
 - **S3 offload for large values.** Values above the DynamoDB item-size limit are transparently offloaded to [Amazon S3](https://aws.amazon.com/s3/) (opt-in `s3Bucket`), with a small pointer item remaining in DynamoDB. Callers see one byte contract regardless of size.
 - **Optional gzip compression.** Applied before the offload size check, so compressible values stay inline at lower cost. Each item records whether it was compressed, so reads are correct regardless of the setting.
 - **Optional TTL.** Writes stamp a DynamoDB-native epoch-seconds attribute, and `read` / `list` / `search` also filter already-expired items, covering the window before DynamoDB physically deletes them.
-- **Vector search.** `search()` calls DynamoDB `SearchVectors` natively against a vector index on the table, with the search condition pinned to the caller's partition, bounded `TopK`, and results in most-similar-first order. Consumers feature-detect (`if (storage.search)`) and fall back to client-side KNN when absent. The store searches pre-computed embedding vectors and does not embed text; a plain-string query is rejected with a clear error. Like a global secondary index, the vector index is eventually consistent.
+- **Vector search.** `search()` calls DynamoDB `SearchVectors` natively against a vector index on the table, with the search condition pinned to the caller's partition, bounded `TopK`, and results in most-similar-first order. Consumers feature-detect (`if (storage.search)`) and fall back to client-side KNN when absent. The storage searches pre-computed embedding vectors and does not embed text; a plain-string query is rejected with an error that points at `DynamoDBMemoryStore`. Like a global secondary index, the vector index is eventually consistent.
+- **Long-term memory store.** `DynamoDBMemoryStore` implements the SDK's `MemoryStore` for the Memory Manager: one Bedrock embedding call and one `PutItem` per memory, one embedding call and one `SearchVectors` per search, with inline memories read from the index projection rather than the base table. `BedrockEmbedder` supports Amazon Titan Text Embeddings V2 and Cohere Embed v3 and v4; any other model plugs in as an embed function.
 - **Multi-tenant prefixes.** A constructor-bound prefix namespaces every key, enforced on both structured and string-prefix queries.
-- **Lazy, peer-declared AWS clients.** The AWS SDK clients are lazy-loaded and declared as peer (optional) dependencies, so consumers that never construct a `DynamoDBStorage` are not forced to install them.
+- **Lazy, peer-declared AWS clients.** The AWS SDK clients are lazy-loaded and declared as peer (optional) dependencies, so consumers that never construct a `DynamoDBStorage` are not forced to install them. In TypeScript, `@aws-sdk/client-bedrock-runtime` is needed only for `BedrockEmbedder`.
 
 ## Releases
 

@@ -129,10 +129,10 @@ export interface DynamoDBStorageConfig {
   vectorSearch?: VectorSearchAdapter
 }
 
-/** Attribute names for the single-table layout. */
-/** User-Agent marker attributing this package's AWS traffic (self-built clients only). */
-const USER_AGENT_MARKER = 'strands-dynamodb-storage'
+/** User-Agent marker on every AWS client this package creates. */
+export const USER_AGENT_MARKER = 'strands-dynamodb-storage'
 
+/** Attribute names for the single-table layout. */
 const PK = 'pk'
 const SK = 'sk'
 const KEY_ATTR = 'k'
@@ -413,6 +413,18 @@ export class DynamoDBStorage implements Storage<string | DynamoDBListQuery> {
   }
 
   /**
+   * Returns the partition key (`pk`) that `key` is stored under. The namespace prefix
+   * is applied first, the same way {@link write} applies it, so the result can be
+   * passed as {@link SearchQuery.pk} to pin a vector search to the partition that
+   * holds `key`.
+   *
+   * @throws {@link StorageError} if the key is empty or contains a `..` segment
+   */
+  partitionKey(key: string): string {
+    return this._split(`${this._prefix}${normalizeKey(key)}`).pk
+  }
+
+  /**
    * Nearest-neighbour vector search over items written with a `vector`.
    *
    * Optional part of the {@link Storage} contract — consumers feature-detect
@@ -433,9 +445,12 @@ export class DynamoDBStorage implements Storage<string | DynamoDBListQuery> {
    * TTL attribute, or an adapter that does not return it) is kept. Expired matches are
    * not back-filled, so a search can return fewer than `topK` results.
    *
-   * @throws {@link StorageError} if the search fails, `topK` is out of range, or the
-   *   query is a plain string — this store searches pre-computed embedding vectors and
-   *   does not embed text, so callers must supply a {@link SearchQuery}
+   * This store does not embed text. A plain-string query, which the SDK's `Storage`
+   * contract allows, is rejected: use {@link DynamoDBMemoryStore} for text search, or
+   * embed the text and pass a {@link SearchQuery}.
+   *
+   * @throws {@link StorageError} if the query is a plain string, the search fails, or
+   *   `topK` is out of range
    */
   async search(query: SearchQuery | string): Promise<SearchResult[]> {
     if (typeof query === 'string') {
@@ -443,7 +458,8 @@ export class DynamoDBStorage implements Storage<string | DynamoDBListQuery> {
       // store has no embedding model, so it cannot honour one.
       throw new StorageError(
         'DynamoDBStorage.search requires a SearchQuery with a pre-computed embedding vector. ' +
-          'Plain-string queries are not supported: embed the text first and pass { vector, topK }.'
+          'Plain-string queries are not supported: embed the text first and pass { vector, topK }, ' +
+          'or use DynamoDBMemoryStore, which embeds text for you.'
       )
     }
     if (query.pk !== undefined) this._assertPkInScope(query.pk)
@@ -800,4 +816,19 @@ export class DynamoDBStorage implements Storage<string | DynamoDBListQuery> {
     const client = await this._getS3Client()
     await client.send(new DeleteObjectCommand({ Bucket: this._s3Bucket, Key: this._s3Key(fullKey) }))
   }
+}
+
+/**
+ * Region a {@link DynamoDBStorage} talks to, for AWS clients created alongside it:
+ * the configured `region`, or the region of an injected client. `undefined` means the
+ * SDK's default resolution. Internal: not exported from the package entry point.
+ */
+export function storageRegion(storage: DynamoDBStorage): string | (() => Promise<string>) | undefined {
+  const region = storage['_region']
+  // Same test as the storage's own clients: an empty string means the SDK default chain.
+  if (region) return region
+  const configured = (storage['_client'] as { config?: { region?: unknown } } | undefined)?.config?.region
+  // SDK v3 clients resolve `region` to a provider function, whatever the caller passed.
+  if (typeof configured === 'function') return configured as () => Promise<string>
+  return undefined
 }

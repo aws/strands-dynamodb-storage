@@ -11,7 +11,7 @@ directory into your own project and start from there.
 | | Example | What it shows | The DynamoDB angle |
 |---|---|---|---|
 | 🔄 | [session-resume](./session-resume/) | A conversation survives a restart: a brand-new process picks up the thread from a persisted snapshot | Point reads on the hot path of every agent turn |
-| 🧠 | [semantic-memory](./semantic-memory/) | Long-term memory recalled by meaning, with the `MemoryStore` bridge class and Memory Manager wiring | A vector index on the same table as the agent's state |
+| 🧠 | [semantic-memory](./semantic-memory/) | Long-term memory recalled by meaning, with `DynamoDBMemoryStore` and Memory Manager wiring | A vector index on the same table as the agent's state |
 | 🏢 | [multi-tenant](./multi-tenant/) | Two users share a table; listings and searches provably never cross the boundary | Prefix-scoped keys and partition-scoped vector search |
 | ⏳ | [ttl-sessions](./ttl-sessions/) | Ephemeral state that expires itself, with no cleanup job to write | Native TTL: stamp on write, filter on read, reap in the background |
 | 📦 | [context-offload](./context-offload/) | A 1 MB value round-trips through the same four-method contract as a 26-byte one | Transparent S3 spillover behind a pointer item |

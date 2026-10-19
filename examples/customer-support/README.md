@@ -12,7 +12,7 @@ feeds both SDK managers:
 ```python
 storage = DynamoDBStorage(table, prefix="customer/acme")
 session = SnapshotSessionManager("ticket-7341", storage=storage)
-memory = MemoryManager(stores=[DynamoDBMemoryStore(storage, ...)], add_tool_config=True)
+memory = MemoryManager(stores=[DynamoDBMemoryStore(storage, name="account-memory")], add_tool_config=True)
 agent = Agent(system_prompt=..., session_manager=session, memory_manager=memory)
 ```
 
@@ -20,8 +20,8 @@ agent = Agent(system_prompt=..., session_manager=session, memory_manager=memory)
   resume it: a redeploy, a handoff, tomorrow's follow-up.
 - The memory manager recalls the customer's account facts by meaning before
   each model call, and `add_memory` lets the agent store new conclusions.
-- The constructor prefix and partition-scoped search keep every read, write,
-  and recall inside this customer's key space. Another customer's assistant
+- The constructor prefix keeps every read and write inside this customer's
+  key space, and the memory store searches only the customer's partition. Another customer's assistant
   built the same way cannot reach any of it.
 
 ## Run it

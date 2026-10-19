@@ -749,6 +749,17 @@ def test_public_exports():
     assert pkg.DynamoDBStorage is DynamoDBStorage
     for name in ("DynamoDBListQuery", "SearchQuery", "SearchResult", "VectorSearchAdapter"):
         assert hasattr(pkg, name)
+    for name in (
+        "DynamoDBMemoryStore",
+        "BedrockEmbedder",
+        "BedrockModelFamily",
+        "DEFAULT_EMBEDDING_MODEL_ID",
+        "Embedder",
+        "EmbedFunction",
+        "EmbeddingPurpose",
+    ):
+        assert hasattr(pkg, name)
+        assert name in pkg.__all__
 
 
 # --------------------------------------------------- AutoSDE regression coverage
