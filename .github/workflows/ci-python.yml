@@ -11,6 +11,8 @@ on:
     paths:
       - 'python/**'
       - '.github/workflows/ci-python.yml'
+  # release-please.yml starts this on the release branch, whose pushes start no runs.
+  workflow_dispatch:
 
 permissions:
   contents: read

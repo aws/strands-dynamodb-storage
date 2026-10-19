@@ -1,0 +1,70 @@
+name: Release Please
+
+# Keeps one release pull request open for both packages, built from the
+# Conventional Commits merged to main since the last release. The two packages
+# share one version (linked-versions in release-please-config.json). Merging
+# the release pull request creates the python-v* and typescript-v* GitHub
+# Releases and starts publish-python.yml and publish-typescript.yml on those
+# tags, which wait for approval in the pypi and npm environments.
+#
+# Pull requests, pushes and releases made with GITHUB_TOKEN start no workflow
+# runs, apart from workflow_dispatch. So this workflow starts the runs itself:
+# the CI and code scanning checks on the release branch, which include the
+# checks main requires, and the publish workflows on the new tags.
+on:
+  push:
+    branches: [ main ]
+
+permissions: {}
+
+concurrency:
+  group: release-please
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    name: Release Please
+    runs-on: ubuntu-latest
+    permissions:
+      # Push the release branch, and create the tags and releases.
+      contents: write
+      # Open and update the release pull request.
+      pull-requests: write
+      # Add and change the release labels on the pull request.
+      issues: write
+      # Start the check and publish workflows with workflow_dispatch.
+      actions: write
+    steps:
+      - name: Run release-please
+        id: release
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+      - name: Run checks on the release pull request
+        if: steps.release.outputs.prs_created == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          BRANCH: ${{ fromJSON(steps.release.outputs.pr).headBranchName }}
+        run: |
+          for workflow in code-scanning.yml ci-python.yml ci-typescript.yml; do
+            gh workflow run "$workflow" --ref "$BRANCH"
+          done
+
+      - name: Publish Python
+        if: steps.release.outputs['python--release_created'] == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ steps.release.outputs['python--tag_name'] }}
+        run: gh workflow run publish-python.yml --ref "$TAG"
+
+      - name: Publish TypeScript
+        if: steps.release.outputs['typescript--release_created'] == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ steps.release.outputs['typescript--tag_name'] }}
+        run: gh workflow run publish-typescript.yml --ref "$TAG"

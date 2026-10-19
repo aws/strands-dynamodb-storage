@@ -1,0 +1,26 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "include-component-in-tag": true,
+  "include-v-in-tag": true,
+  "tag-separator": "-",
+  "separate-pull-requests": false,
+  "packages": {
+    "python": {
+      "release-type": "python",
+      "component": "python",
+      "package-name": "strands-dynamodb-storage"
+    },
+    "typescript": {
+      "release-type": "node",
+      "component": "typescript",
+      "package-name": "strands-dynamodb-storage"
+    }
+  },
+  "plugins": [
+    {
+      "type": "linked-versions",
+      "groupName": "strands-dynamodb-storage",
+      "components": ["python", "typescript"]
+    }
+  ]
+}
