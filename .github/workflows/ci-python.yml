@@ -27,6 +27,10 @@ jobs:
   check:
     name: Lint, type-check, unit tests (py${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Codecov authenticates the coverage upload with the job's OIDC token.
+      id-token: write
     strategy:
       fail-fast: false
       matrix:
@@ -55,4 +59,16 @@ jobs:
 
       - name: Unit tests (moto, no AWS credentials)
         # tests/integ is gated behind RUN_INTEG and is intentionally not run here.
-        run: pytest tests -q
+        run: pytest tests -q --cov --cov-report=xml
+
+      - name: Upload coverage to Codecov
+        if: matrix.python-version == '3.12'
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+        with:
+          files: python/coverage.xml
+          disable_search: true
+          flags: python
+          # Pull requests from forks get no OIDC token; Codecov accepts their uploads without one.
+          use_oidc: ${{ !github.event.pull_request.head.repo.fork }}
+          # A failed upload fails the run on main, where the report matters, but not on pull requests.
+          fail_ci_if_error: ${{ github.event_name == 'push' }}

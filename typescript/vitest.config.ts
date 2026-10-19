@@ -12,5 +12,12 @@ export default defineConfig({
   test: {
     include: ['src/**/*.test.ts'],
     exclude: ['test/integ/**', 'node_modules/**', 'dist/**'],
+    // Used by `npm run test:coverage`; CI uploads the lcov report to Codecov.
+    coverage: {
+      provider: 'v8',
+      include: ['src/**/*.ts'],
+      exclude: ['src/**/*.test.ts'],
+      reporter: ['text', 'lcov'],
+    },
   },
 })

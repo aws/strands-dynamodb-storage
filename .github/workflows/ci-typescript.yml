@@ -27,6 +27,10 @@ jobs:
   check:
     name: Type-check, unit tests, build (node ${{ matrix.node-version }})
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Codecov authenticates the coverage upload with the job's OIDC token.
+      id-token: write
     strategy:
       fail-fast: false
       matrix:
@@ -51,3 +55,19 @@ jobs:
 
       - name: Build
         run: npm run build
+
+      - name: Unit test coverage
+        if: matrix.node-version == '22'
+        run: npm run test:coverage
+
+      - name: Upload coverage to Codecov
+        if: matrix.node-version == '22'
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+        with:
+          files: typescript/coverage/lcov.info
+          disable_search: true
+          flags: typescript
+          # Pull requests from forks get no OIDC token; Codecov accepts their uploads without one.
+          use_oidc: ${{ !github.event.pull_request.head.repo.fork }}
+          # A failed upload fails the run on main, where the report matters, but not on pull requests.
+          fail_ci_if_error: ${{ github.event_name == 'push' }}

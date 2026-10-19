@@ -22,6 +22,7 @@
     "build": "tsc -p tsconfig.build.json",
     "type-check": "tsc --noEmit",
     "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
     "test:watch": "vitest",
     "test:integ": "vitest run -c vitest.integ.config.ts",
     "lint": "eslint src test",
