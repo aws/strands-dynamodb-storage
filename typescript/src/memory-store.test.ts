@@ -413,6 +413,34 @@ describe('DynamoDBMemoryStore: search', () => {
     expect(entries.map((e) => [e.content, e.metadata?._key])).toEqual([['\ufffd\ufffd', 'memory/prefs/bin']])
   })
 
+  it('reads no value for a match outside the store; its own still get one', async () => {
+    const { client, store } = setup({ config: { name: 'prefs' } })
+    const vector = [1, 0, 0, 0, 0, 0, 0.01]
+    const put = (sk: string, extra: Record<string, unknown>) =>
+      client.items.set(`user/u1\u0000${sk}`, { pk: 'user/u1', sk, vector, ...extra })
+    // Another store's offloaded memory, an application item whose payload the index does
+    // not return, and a key that contains this store's prefix later on.
+    put('memory/facts/big', { s3: true })
+    put('notes/n1', { s3: true })
+    put('x/memory/prefs/y', { s3: true })
+    // A store whose name starts with this one's: "prefs2" is not under "memory/prefs/".
+    put('memory/prefs2/sib', { data: new TextEncoder().encode('sibling') })
+    put('memory/prefs2/off', { s3: true })
+    // This store's own offloaded memory, deleted before the read.
+    put('memory/prefs/gone', { s3: true })
+    put('memory/prefs/abc', { data: new TextEncoder().encode('Prefers a window seat') })
+    const reads: string[] = []
+    const send = client.send.bind(client)
+    client.send = async (command: unknown) => {
+      if (!(command instanceof GetCommand)) return send(command)
+      reads.push((command.input.Key as { sk: string }).sk)
+      return {}
+    }
+    const entries = await store.search('window')
+    expect(reads).toEqual(['memory/prefs/gone'])
+    expect(entries.map((e) => [e.content, e.metadata?._key])).toEqual([['Prefers a window seat', 'memory/prefs/abc']])
+  })
+
   it('reads back content with a byte order mark unchanged', async () => {
     const { store } = setup()
     const content = '\ufeffPrefers a window seat'
@@ -1012,6 +1040,65 @@ describe('DynamoDBMemoryStore: error messages', () => {
     const { store } = setup({ config: { name: 'prefs' } })
     await store.add('Prefers a window seat', metadata as never)
     expect(warn).toHaveBeenCalledWith(`store=<prefs>, ${line}`)
+  })
+
+  it.each([
+    ['safe\nFORGED=admin', 'safe\\nFORGED=admin'],
+    ['safe\rFORGED=admin', 'safe\\rFORGED=admin'],
+    ['a\tb', 'a\\tb'],
+    ['a\u2028b\u2029c', 'a\\u2028b\\u2029c'],
+    ['a\u202eb\u2066c\u200fd', 'a\\u202eb\\u2066c\\u200fd'],
+    ['a\u0085b\u001bc\u007fd\u0000e', 'a\\u0085b\\u001bc\\u007fd\\u0000e'],
+    ['a\\nb', 'a\\\\nb'],
+    ['a b\u001f\u009f\u00a0c', 'a b\\u001f\\u009f\u00a0c'],
+    ['e\u{1f600}', 'e\u{1f600}'],
+  ])('escapes the key %j in the drop warning, so it cannot forge a log record', async (key, shown) => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const { store } = setup({ config: { name: 'prefs' } })
+    await store.add('Prefers a window seat', { [key]: ['a'] } as never)
+    expect(warn.mock.calls).toEqual([
+      [
+        `store=<prefs>, key=<${shown}> | dropping metadata entry: has type array; values must be strings, numbers, or booleans`,
+      ],
+    ])
+  })
+
+  it.each([
+    ['a\ud800', 'a\\ud800'],
+    ['k\udfff', 'k\\udfff'],
+  ])('escapes the lone surrogate in %j at both ends of the range', async (key, shown) => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const { store } = setup({ config: { name: 'prefs' } })
+    await store.add('Prefers a window seat', { [key]: 'x' })
+    expect(warn.mock.calls).toEqual([
+      [
+        `store=<prefs>, key=<${shown}> | dropping metadata entry: contains a lone surrogate, which DynamoDB stores as '?'`,
+      ],
+    ])
+  })
+
+  it('escapes the store name in both drop warnings', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const { store } = setup({ config: { name: 'pr\u2028e\u202efs' } })
+    await store.add('Prefers a window seat', { k: ['a'] } as never)
+    await store.add('Prefers a window seat', ['a'] as never)
+    expect(warn.mock.calls).toEqual([
+      [
+        'store=<pr\\u2028e\\u202efs>, key=<k> | dropping metadata entry: has type array; values must be strings, numbers, or booleans',
+      ],
+      ['store=<pr\\u2028e\\u202efs> | dropping metadata that is not a plain object'],
+    ])
+  })
+
+  it('writes a lone surrogate in a dropped key as \\udcff, as the Python package does', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const { store } = setup({ config: { name: 'prefs' } })
+    await store.add('Prefers a window seat', { 'n\udcff': 'x' })
+    expect(warn.mock.calls).toEqual([
+      [
+        "store=<prefs>, key=<n\\udcff> | dropping metadata entry: contains a lone surrogate, which DynamoDB stores as '?'",
+      ],
+    ])
   })
 
   it('returns padded content unchanged from search', async () => {

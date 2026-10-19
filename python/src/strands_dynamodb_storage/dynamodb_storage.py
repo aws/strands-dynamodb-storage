@@ -471,6 +471,18 @@ class DynamoDBStorage:
             StorageError: If the query is a plain string, the search fails, or
                 ``top_k`` is out of range.
         """
+        return await self._search(query)
+
+    async def _search(
+        self, query: Union[SearchQuery, str], key_prefix: Optional[str] = None
+    ) -> builtins.list[SearchResult]:
+        """:meth:`search`, keeping only keys that start with ``key_prefix``.
+
+        ``key_prefix`` is relative to this storage's namespace. Other keys are
+        dropped before their values are read, so an offloaded or unprojected match
+        that the caller would discard costs no point read. Used by
+        :class:`DynamoDBMemoryStore`, which shares its partition with other items.
+        """
         if isinstance(query, str):
             raise StorageError(
                 "DynamoDBStorage.search requires a SearchQuery with a pre-computed embedding vector. "
@@ -502,6 +514,8 @@ class DynamoDBStorage:
                 # a foreign key would otherwise be handed back looking like one of ours.
                 key = self._strip_prefix(match["key"])
                 if key is None:
+                    continue
+                if key_prefix is not None and not key.startswith(key_prefix):
                     continue
                 if self._ttl_enabled and self._has_passed(match.get("expire_at")):
                     continue

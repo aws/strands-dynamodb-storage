@@ -41,7 +41,8 @@ class DynamoDBMemoryStore(MemoryStore):
     holds this store's memories. Memories stored inline come back from the index
     projection with no base-table read; a memory offloaded to S3, or a match from an
     index that does not project the data attribute, costs one point read (GetItem,
-    plus the S3 read for an offloaded memory).
+    plus the S3 read for an offloaded memory). Matches that are not this store's
+    memories are dropped before any read.
 
     Embedding happens here, not in the storage: session snapshots and other values
     written through the same ``DynamoDBStorage`` are never embedded.
@@ -168,14 +169,15 @@ class DynamoDBMemoryStore(MemoryStore):
             # Bedrock would embed it as "?", a different query from the one asked.
             raise ValueError("query must be valid Unicode text; it contains a lone surrogate")
         vector = await self._embed(query, "query")
-        results = await self._storage.search(
-            SearchQuery(vector=vector, top_k=limit, pk=self._partition, include_values=True)
+        # The partition can hold other vector items (another store's memories, or the
+        # application's own); keep only this store's, dropped before any value is read.
+        results = await self._storage._search(
+            SearchQuery(vector=vector, top_k=limit, pk=self._partition, include_values=True),
+            key_prefix=self._key_prefix,
         )
         entries: builtins.list[MemoryEntry] = []
         for result in results:
-            # The partition can hold other vector items (another store's memories, or
-            # the application's own); keep only this store's.
-            if not result.key.startswith(self._key_prefix) or result.data is None:
+            if result.data is None:
                 continue
             metadata: dict[str, Any] = dict(result.metadata) if result.metadata else {}
             metadata["_key"] = result.key
@@ -254,8 +256,8 @@ class DynamoDBMemoryStore(MemoryStore):
         if not isinstance(metadata, dict):
             logger.warning(
                 "store=<%s> | dropping metadata of type %s; metadata must be a dict",
-                self.name,
-                type(metadata).__name__,
+                _log_safe(self.name),
+                _log_safe(type(metadata).__name__),
             )
             return None
         kept: dict[str, Union[str, int, float, bool]] = {}
@@ -272,7 +274,7 @@ class DynamoDBMemoryStore(MemoryStore):
             elif isinstance(value, (int, float)) and not isinstance(value, bool) and not _is_dynamodb_number(value):
                 reason = "is out of range (finite, zero or 1e-130 to 2^53 - 1 in magnitude)"
             elif not isinstance(value, (str, int, float, bool)):
-                reason = f"has type {type(value).__name__}; values must be strings, numbers, or booleans"
+                reason = f"has type {_log_safe(type(value).__name__)}; values must be strings, numbers, or booleans"
             else:
                 # Plain values: str() of an enum member that subclasses str or int gives
                 # "Color.RED", not the value (for IntEnum on Python 3.10, which then fails the write).
@@ -286,9 +288,9 @@ class DynamoDBMemoryStore(MemoryStore):
                     else float(value)
                 )
                 continue
-            # backslashreplace: a lone surrogate in the key would fail a UTF-8 log file handler.
-            shown = str.__str__(key).encode("utf-8", "backslashreplace").decode() if isinstance(key, str) else key
-            logger.warning("store=<%s>, key=<%s> | dropping metadata entry: %s", self.name, shown, reason)
+            # A key comes from model output: escape it so it cannot break or forge a log line.
+            shown = _log_safe(str.__str__(key) if isinstance(key, str) else repr(key))
+            logger.warning("store=<%s>, key=<%s> | dropping metadata entry: %s", _log_safe(self.name), shown, reason)
         return kept or None
 
 
@@ -308,6 +310,26 @@ def _is_blank(text: str) -> bool:
 def _is_control(character: str) -> bool:
     """C0 and C1 control characters and DEL, the set both packages reject in store names."""
     return ord(character) < 0x20 or 0x7F <= ord(character) <= 0x9F
+
+
+_LOG_ESCAPES = {"\\": "\\\\", "\n": "\\n", "\r": "\\r", "\t": "\\t"}
+# Line and paragraph separators, and the Bidi_Control characters, which can reorder the
+# rest of a line in a viewer that applies the Unicode bidirectional algorithm.
+_LOG_UNICODE_ESCAPES = frozenset("\u2028\u2029\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069")
+
+
+def _log_safe(text: str) -> str:
+    """``text`` for a log line: backslash, control characters, line separators,
+    bidirectional controls and lone surrogates escaped, so a value from model output
+    cannot split the line or reorder how it displays."""
+    return "".join(
+        _LOG_ESCAPES[c]
+        if c in _LOG_ESCAPES
+        else f"\\u{ord(c):04x}"
+        if _is_control(c) or c in _LOG_UNICODE_ESCAPES or 0xD800 <= ord(c) <= 0xDFFF
+        else c
+        for c in text
+    )
 
 
 def _is_dynamodb_number(value: Union[int, float]) -> bool:

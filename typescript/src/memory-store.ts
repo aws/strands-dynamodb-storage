@@ -4,7 +4,7 @@
 import { createHash } from 'node:crypto'
 import { StorageError } from '@strands-agents/sdk'
 import type { ExtractionConfig, JSONValue, MemoryEntry, MemoryStore, SearchOptions } from '@strands-agents/sdk'
-import { DynamoDBStorage, storageRegion } from './dynamodb-storage.js'
+import { DynamoDBStorage, searchUnderKeyPrefix, storageRegion } from './dynamodb-storage.js'
 import {
   BedrockEmbedder,
   describeError,
@@ -64,7 +64,8 @@ export interface DynamoDBMemoryStoreConfig {
  * call, pinned to the partition that holds this store's memories. Memories stored inline
  * come back from the index projection with no base-table read; a memory offloaded to S3,
  * or a match from an index that does not project the data attribute, costs one point read
- * (GetItem, plus the S3 read for an offloaded memory).
+ * (GetItem, plus the S3 read for an offloaded memory). Matches that are not this store's
+ * memories are dropped before any read.
  *
  * Embedding happens here, not in the storage: session snapshots and other values written
  * through the same {@link DynamoDBStorage} are never embedded.
@@ -178,14 +179,18 @@ export class DynamoDBMemoryStore implements MemoryStore {
       throw new RangeError('query must be valid Unicode text; it contains a lone surrogate')
     }
     const vector = await this._embed(query, 'query')
-    const results = await this._storage.search({ vector, topK: limit, pk: this._partition, includeValues: true })
+    // The partition can hold other vector items (another store's memories, or the
+    // application's own); keep only this store's, dropped before any value is read.
+    const results = await searchUnderKeyPrefix(
+      this._storage,
+      { vector, topK: limit, pk: this._partition, includeValues: true },
+      this._keyPrefix
+    )
     // ignoreBOM keeps a leading U+FEFF, so content reads back exactly as it was stored.
     const decoder = new TextDecoder('utf-8', { ignoreBOM: true })
     const entries: MemoryEntry[] = []
     for (const result of results) {
-      // The partition can hold other vector items (another store's memories, or the
-      // application's own); keep only this store's.
-      if (!result.key.startsWith(this._keyPrefix) || result.data === undefined) continue
+      if (result.data === undefined) continue
       const metadata: Record<string, JSONValue> = {
         ...((result.metadata ?? {}) as Record<string, JSONValue>),
         _key: result.key,
@@ -269,7 +274,7 @@ export class DynamoDBMemoryStore implements MemoryStore {
     if (metadata === undefined || metadata === null) return undefined
     const prototype = typeof metadata === 'object' ? Object.getPrototypeOf(metadata) : undefined
     if (typeof metadata !== 'object' || (prototype !== Object.prototype && prototype !== null)) {
-      console.warn(`store=<${this.name}> | dropping metadata that is not a plain object`)
+      console.warn(`store=<${logSafe(this.name)}> | dropping metadata that is not a plain object`)
       return undefined
     }
     const kept: Record<string, string | number | boolean> = {}
@@ -286,7 +291,8 @@ export class DynamoDBMemoryStore implements MemoryStore {
         reason = `has type ${value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value}; values must be strings, numbers, or booleans`
       }
       if (reason === undefined) kept[key] = value as string | number | boolean
-      else console.warn(`store=<${this.name}>, key=<${key}> | dropping metadata entry: ${reason}`)
+      // A key comes from model output: escape it so it cannot break or forge a log line.
+      else console.warn(`store=<${logSafe(this.name)}>, key=<${logSafe(key)}> | dropping metadata entry: ${reason}`)
     }
     return Object.keys(kept).length > 0 ? kept : undefined
   }
@@ -311,6 +317,30 @@ function isBlank(text: string): boolean {
 function isControl(character: string): boolean {
   const code = character.charCodeAt(0)
   return code < 0x20 || (code >= 0x7f && code <= 0x9f)
+}
+
+const LOG_ESCAPES: Record<string, string> = { '\\': '\\\\', '\n': '\\n', '\r': '\\r', '\t': '\\t' }
+// Line and paragraph separators, and the Bidi_Control characters, which can reorder the
+// rest of a line in a viewer that applies the Unicode bidirectional algorithm.
+const LOG_UNICODE_ESCAPES = new Set([
+  0x2028, 0x2029, 0x061c, 0x200e, 0x200f, 0x202a, 0x202b, 0x202c, 0x202d, 0x202e, 0x2066, 0x2067, 0x2068, 0x2069,
+])
+
+/**
+ * `text` for a log line: backslash, control characters, line separators, bidirectional
+ * controls and lone surrogates escaped, so a value from model output cannot split the
+ * line or reorder how it displays. Same output as the Python package.
+ */
+function logSafe(text: string): string {
+  let out = ''
+  for (const character of text) {
+    const code = character.codePointAt(0)!
+    if (LOG_ESCAPES[character] !== undefined) out += LOG_ESCAPES[character]
+    else if (isControl(character) || LOG_UNICODE_ESCAPES.has(code) || (code >= 0xd800 && code <= 0xdfff)) {
+      out += `\\u${code.toString(16).padStart(4, '0')}`
+    } else out += character
+  }
+  return out
 }
 
 function checkLimit(value: unknown, label: string): void {

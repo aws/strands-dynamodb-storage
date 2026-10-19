@@ -443,6 +443,43 @@ async def test_search_skips_an_offloaded_match_whose_item_is_gone_and_decodes_in
     assert [(e.content, e.metadata["_key"]) for e in entries] == [("\ufffd\ufffd", "memory/prefs/bin")]
 
 
+async def test_search_reads_no_value_for_a_match_outside_the_store(ddb):
+    """Matches the store discards are dropped before the point read; its own still get one."""
+    store = DynamoDBMemoryStore(make_storage(ddb).namespace("user/u1"), name="prefs", embedder=KeywordEmbedder())
+    response = {
+        "SearchResults": [
+            # Another store's offloaded memory, an application item whose payload the index
+            # does not project, and a key that contains this store's prefix later on.
+            {"Item": {"pk": {"S": "user/u1"}, "sk": {"S": "memory/facts/big"}, "s3": {"BOOL": True}}, "Score": 0.01},
+            {"Item": {"pk": {"S": "user/u1"}, "sk": {"S": "notes/n1"}}, "Score": 0.02},
+            {"Item": {"pk": {"S": "user/u1"}, "sk": {"S": "x/memory/prefs/y"}}, "Score": 0.03},
+            # A store whose name starts with this one's: "prefs2" is not under "memory/prefs/".
+            {
+                "Item": {"pk": {"S": "user/u1"}, "sk": {"S": "memory/prefs2/sib"}, "data": {"B": b"sibling"}},
+                "Score": 0.031,
+            },
+            {"Item": {"pk": {"S": "user/u1"}, "sk": {"S": "memory/prefs2/off"}, "s3": {"BOOL": True}}, "Score": 0.032},
+            # This store's own offloaded memory, deleted before the read.
+            {"Item": {"pk": {"S": "user/u1"}, "sk": {"S": "memory/prefs/gone"}, "s3": {"BOOL": True}}, "Score": 0.04},
+            {
+                "Item": {
+                    "pk": {"S": "user/u1"},
+                    "sk": {"S": "memory/prefs/abc"},
+                    "data": {"B": b"Prefers a window seat"},
+                },
+                "Score": 0.05,
+            },
+        ]
+    }
+    with (
+        mock.patch.object(ddb, "search_vectors", create=True, return_value=response),
+        mock.patch.object(ddb, "get_item", wraps=ddb.get_item) as get_item,
+    ):
+        entries = await store.search("window")
+    assert [call.kwargs["Key"]["sk"]["S"] for call in get_item.call_args_list] == ["memory/prefs/gone"]
+    assert [(e.content, e.metadata["_key"]) for e in entries] == [("Prefers a window seat", "memory/prefs/abc")]
+
+
 async def test_content_with_a_byte_order_mark_reads_back_unchanged(ddb):
     store = make_store(ddb)
     content = "\ufeffPrefers a window seat"
@@ -1046,6 +1083,68 @@ async def test_drop_warning_lines(ddb, caplog, metadata, line):
     with caplog.at_level(logging.WARNING, logger="strands_dynamodb_storage.memory_store"):
         await store.add("Prefers a window seat", metadata)
     assert f"store=<prefs>, {line}" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("key", "shown"),
+    [
+        ("safe\nFORGED=admin", "safe\\nFORGED=admin"),
+        ("safe\rFORGED=admin", "safe\\rFORGED=admin"),
+        ("a\tb", "a\\tb"),
+        ("a\u2028b\u2029c", "a\\u2028b\\u2029c"),
+        ("a\u202eb\u2066c\u200fd", "a\\u202eb\\u2066c\\u200fd"),
+        ("a\x85b\x1bc\x7fd\x00e", "a\\u0085b\\u001bc\\u007fd\\u0000e"),
+        ("a\\nb", "a\\\\nb"),
+        ("a b\x1f\x9f\xa0c", "a b\\u001f\\u009f\xa0c"),
+        ("e\U0001f600", "e\U0001f600"),
+    ],
+)
+async def test_drop_warning_escapes_the_key(ddb, caplog, key, shown):
+    """A key from model output stays on one escaped line, so it cannot forge a log record."""
+    store = make_store(ddb, name="prefs")
+    with caplog.at_level(logging.WARNING, logger="strands_dynamodb_storage.memory_store"):
+        await store.add("Prefers a window seat", {key: ["a"]})
+    assert [record.getMessage() for record in caplog.records] == [
+        f"store=<prefs>, key=<{shown}> | dropping metadata entry: "
+        "has type list; values must be strings, numbers, or booleans"
+    ]
+
+
+async def test_drop_warnings_escape_the_store_name(ddb, caplog):
+    """Name validation keeps an inner U+2028 or bidi control; the warning escapes them."""
+    store = make_store(ddb, name="pr\u2028e\u202efs")
+    with caplog.at_level(logging.WARNING, logger="strands_dynamodb_storage.memory_store"):
+        await store.add("Prefers a window seat", {"k": ["a"]})
+        await store.add("Prefers a window seat", ["a"])  # type: ignore[arg-type]
+    assert [record.getMessage() for record in caplog.records] == [
+        "store=<pr\\u2028e\\u202efs>, key=<k> | dropping metadata entry: "
+        "has type list; values must be strings, numbers, or booleans",
+        "store=<pr\\u2028e\\u202efs> | dropping metadata of type list; metadata must be a dict",
+    ]
+
+
+@pytest.mark.parametrize(("key", "shown"), [("a\ud800", "a\\ud800"), ("k\udfff", "k\\udfff")])
+async def test_drop_warning_escapes_lone_surrogates_at_both_ends_of_the_range(ddb, caplog, key, shown):
+    store = make_store(ddb, name="prefs")
+    with caplog.at_level(logging.WARNING, logger="strands_dynamodb_storage.memory_store"):
+        await store.add("Prefers a window seat", {key: "x"})
+    assert [record.getMessage() for record in caplog.records] == [
+        f"store=<prefs>, key=<{shown}> | dropping metadata entry: "
+        "contains a lone surrogate, which DynamoDB stores as '?'"
+    ]
+
+
+async def test_drop_warning_escapes_a_value_type_name(ddb, caplog):
+    store = make_store(ddb, name="prefs")
+    value = type("Odd\nFORGED", (), {})()
+    with caplog.at_level(logging.WARNING, logger="strands_dynamodb_storage.memory_store"):
+        await store.add("Prefers a window seat", {"k": value})
+        await store.add("Prefers a window seat", value)
+    assert [record.getMessage() for record in caplog.records] == [
+        "store=<prefs>, key=<k> | dropping metadata entry: "
+        "has type Odd\\nFORGED; values must be strings, numbers, or booleans",
+        "store=<prefs> | dropping metadata of type Odd\\nFORGED; metadata must be a dict",
+    ]
 
 
 async def test_search_returns_padded_content_unchanged(ddb):

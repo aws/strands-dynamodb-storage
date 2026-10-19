@@ -165,8 +165,9 @@ How it behaves:
 - **One memory store per partition.** The partition is the first two segments of the full key: `namespace('user/u1')`
   gives the store partition `user/u1`, but `user/u1/agent-a` and `user/u1/agent-b` share partition `user/u1`. Every item
   with a vector in the partition competes for the same search results, and the store drops matches that are not its
-  own memories, so a second memory store (or the application's own vector items) in the partition can leave results
-  short of `maxSearchResults`. Give each memory store a two-segment namespace of its own, such as `user/<id>`.
+  own memories before reading them, so a second memory store (or the application's own vector items) in the partition
+  costs no extra reads but can leave results short of `maxSearchResults`. Give each memory store a two-segment
+  namespace of its own, such as `user/<id>`.
 - **Only memories are embedded.** Session snapshots and other values written through the same storage never call
   Bedrock.
 - **TTL applies.** With `ttlSeconds` on the storage, memories expire like any other item, and search drops expired

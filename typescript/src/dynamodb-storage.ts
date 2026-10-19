@@ -453,6 +453,16 @@ export class DynamoDBStorage implements Storage<string | DynamoDBListQuery> {
    *   `topK` is out of range
    */
   async search(query: SearchQuery | string): Promise<SearchResult[]> {
+    return this._search(query)
+  }
+
+  /**
+   * {@link search}, keeping only keys that start with `keyPrefix`, which is relative to
+   * this storage's namespace. Other keys are dropped before their values are read, so an
+   * offloaded or unprojected match that the caller would discard costs no point read.
+   * Reached through {@link searchUnderKeyPrefix}.
+   */
+  private async _search(query: SearchQuery | string, keyPrefix?: string): Promise<SearchResult[]> {
     if (typeof query === 'string') {
       // The Storage contract lets consumers pass a natural-language string; this
       // store has no embedding model, so it cannot honour one.
@@ -488,6 +498,7 @@ export class DynamoDBStorage implements Storage<string | DynamoDBListQuery> {
         // foreign key would otherwise be handed back looking like one of ours.
         const key = this._stripPrefix(match.key)
         if (key === null) continue
+        if (keyPrefix !== undefined && !key.startsWith(keyPrefix)) continue
         if (this._ttlEnabled && this._hasPassed(match.expireAt)) continue
         const result: SearchResult = { key, score: match.score }
         if (match.metadata !== undefined) result.metadata = match.metadata
@@ -831,4 +842,18 @@ export function storageRegion(storage: DynamoDBStorage): string | (() => Promise
   // SDK v3 clients resolve `region` to a provider function, whatever the caller passed.
   if (typeof configured === 'function') return configured as () => Promise<string>
   return undefined
+}
+
+/**
+ * Runs {@link DynamoDBStorage.search} keeping only keys under `keyPrefix` (relative to the
+ * storage's namespace), dropped before any value is read. Used by DynamoDBMemoryStore,
+ * which shares its partition with other items. Internal: not exported from the package
+ * entry point.
+ */
+export function searchUnderKeyPrefix(
+  storage: DynamoDBStorage,
+  query: SearchQuery,
+  keyPrefix: string
+): Promise<SearchResult[]> {
+  return storage['_search'](query, keyPrefix)
 }
