@@ -150,7 +150,7 @@ describe('DynamoDBMemoryStore: MemoryStore protocol', () => {
   ])('rejects a %s of %j', (option, value) => {
     const { storage } = setup()
     const config = { embedder: new KeywordEmbedder(), [option]: value } as unknown as DynamoDBMemoryStoreConfig
-    expect(() => new DynamoDBMemoryStore(storage, config)).toThrow(new RegExp(`${option} must be`))
+    expect(() => new DynamoDBMemoryStore(storage, config)).toThrow(`${option} must be`)
   })
 
   it('works inside a MemoryManager', async () => {
