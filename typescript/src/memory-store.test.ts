@@ -8,6 +8,7 @@ import { GetCommand, PutCommand, DeleteCommand, type DynamoDBDocumentClient } fr
 import { marshall } from '@aws-sdk/util-dynamodb'
 import { MemoryManager, StorageError } from '@strands-agents/sdk'
 import { InMemoryStorage } from '@strands-agents/sdk/storage'
+import { Embedder as SdkEmbedder } from '@strands-agents/sdk/storage/search'
 import { DynamoDBStorage } from './dynamodb-storage.js'
 import { DynamoDBMemoryStore } from './memory-store.js'
 import { BedrockEmbedder, type EmbedFunction, type Embedder, type EmbeddingPurpose } from './embedders.js'
@@ -896,12 +897,32 @@ describe('DynamoDBMemoryStore: construction', () => {
   })
 })
 
+/** An SDK `Embedder`, whose `embed` takes only the text. */
+class SdkKeywordEmbedder extends SdkEmbedder {
+  readonly texts: string[] = []
+  private readonly _keywords = new KeywordEmbedder()
+  async embed(text: string): Promise<number[]> {
+    this.texts.push(text)
+    return this._keywords.embed(text, 'document')
+  }
+}
+
+describe('DynamoDBMemoryStore: SDK embedders', () => {
+  it('accepts a Strands SDK Embedder and finds memories with it', async () => {
+    const embedder = new SdkKeywordEmbedder()
+    const { store } = setup({ config: { embedder } })
+    await store.add('Prefers a window seat')
+    await store.add('Drinks black coffee')
+    const results = await store.search('window')
+    expect(results[0]!.content).toBe('Prefers a window seat')
+    expect(embedder.texts).toEqual(['Prefers a window seat', 'Drinks black coffee', 'window'])
+  })
+})
+
 describe('DynamoDBStorage: text queries and partition keys', () => {
-  it('rejects a plain-string search and points at DynamoDBMemoryStore', async () => {
-    const { storage, root } = setup()
-    for (const s of [root, storage]) {
-      await expect(s.search('window')).rejects.toThrow(/or use DynamoDBMemoryStore, which embeds text for you\.$/)
-    }
+  it('sends a plain-string search over the whole table to keyword search, which rejects it as too broad', async () => {
+    const { root } = setup()
+    await expect(root.search('window')).rejects.toThrow(/too broad/)
   })
 
   it('reports the partition a key is stored under', () => {

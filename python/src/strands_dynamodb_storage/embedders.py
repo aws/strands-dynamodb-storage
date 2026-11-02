@@ -39,6 +39,14 @@ class Embedder(Protocol):
         ...
 
 
+class _TextEmbedder(Protocol):
+    """An embedder whose ``embed`` takes only the text, such as ``strands.storage.search.Embedder``."""
+
+    def embed(self, text: str) -> Union[_Vector, Awaitable[_Vector]]:
+        """Return the embedding vector of ``text``."""
+        ...
+
+
 EmbedFunction = Callable[[str], Union[_Vector, Awaitable[_Vector]]]
 """A plain function from text to vector, sync or async, used for both memories and queries.
 

@@ -6,7 +6,9 @@
 from __future__ import annotations
 
 import gzip
+import importlib.util
 import math
+import sys
 import time
 from unittest import mock
 
@@ -16,6 +18,11 @@ from moto import mock_aws
 from strands.types.exceptions import StorageError
 
 from strands_dynamodb_storage import DynamoDBListQuery, DynamoDBStorage, SearchQuery
+
+# Keyword search, the fallback for a plain-string search, ships in strands-agents 1.54.0.
+needs_keyword_search = pytest.mark.skipif(
+    importlib.util.find_spec("strands.storage.search") is None, reason="needs strands-agents>=1.54.0"
+)
 
 REGION = "us-east-1"
 TABLE = "test-table"
@@ -99,6 +106,22 @@ def cosine_adapter(ddb):
         return out[: params["top_k"]]
 
     return adapter
+
+
+class RecordingStrategy:
+    """Search strategy that records index calls and returns canned search results."""
+
+    def __init__(self, results=None):
+        self.indexed: list[tuple[DynamoDBStorage, str, bytes]] = []
+        self.searched: list[tuple[DynamoDBStorage, str]] = []
+        self.results = results if results is not None else []
+
+    async def index(self, storage, key, data, **kwargs):
+        self.indexed.append((storage, key, data))
+
+    async def search(self, storage, query, **kwargs):
+        self.searched.append((storage, query))
+        return self.results
 
 
 # --------------------------------------------------------------------- point ops
@@ -888,3 +911,109 @@ async def test_namespaced_view_can_query_its_own_partition(aws):
     await view.write("scopes/agent/a1/x", b"v")
     await s.write("sessions/s2/other", b"sibling")
     assert await view.list(DynamoDBListQuery(pk="sessions/s1")) == ["scopes/agent/a1/x"]
+
+
+# ---------------------------------------------------------------- search strategy
+
+
+async def test_write_indexes_through_the_search_strategy(aws):
+    strategy = RecordingStrategy()
+    s = make(aws, search_strategy=strategy, compression="gzip")
+    data = b"likes window seats " * 20
+    await s.write("/sessions//s1/a", data)
+    assert strategy.indexed == [(s, "sessions/s1/a", data)]
+
+
+async def test_indexing_failure_raises_but_keeps_the_value(aws):
+    class Failing(RecordingStrategy):
+        async def index(self, storage, key, data, **kwargs):
+            raise RuntimeError("index down")
+
+    s = make(aws, search_strategy=Failing())
+    with pytest.raises(
+        StorageError, match="Wrote 'sessions/s1/a' to DynamoDB table 'test-table' but indexing failed"
+    ) as e:
+        await s.write("sessions/s1/a", b"v")
+    assert isinstance(e.value.__cause__, RuntimeError)
+    assert await s.read("sessions/s1/a") == b"v"
+
+
+async def test_a_strategy_without_index_is_only_searched(aws):
+    # strands-agents releases before 1.56.0 define SearchStrategy with search alone.
+    class SearchOnly:
+        async def search(self, storage, query, **kwargs):
+            return []
+
+    s = make(aws, search_strategy=SearchOnly())
+    await s.write("sessions/s1/a", b"v")
+    assert await s.read("sessions/s1/a") == b"v"
+
+
+async def test_failed_write_is_not_indexed(aws):
+    strategy = RecordingStrategy()
+    s = make(aws, search_strategy=strategy)
+    with pytest.raises(StorageError, match="above the"):
+        await s.write("sessions/s1/a", b"x" * 400_000)
+    assert strategy.indexed == []
+
+
+async def test_string_search_delegates_to_the_search_strategy(aws):
+    results = [object()]
+    strategy = RecordingStrategy(results)
+    s = make(aws, search_strategy=strategy)
+    assert await s.search("window seat") is results
+    assert strategy.searched == [(s, "window seat")]
+
+
+async def test_search_strategy_failure_is_wrapped(aws):
+    class Failing(RecordingStrategy):
+        async def search(self, storage, query, **kwargs):
+            raise RuntimeError("search down")
+
+    with pytest.raises(StorageError, match="Failed to search DynamoDB table 'test-table'") as e:
+        await make(aws, search_strategy=Failing()).search("window")
+    assert isinstance(e.value.__cause__, RuntimeError)
+
+
+async def test_vector_search_query_bypasses_the_search_strategy(aws):
+    strategy = RecordingStrategy()
+    s = make(aws, vector_search=cosine_adapter(aws[0]), search_strategy=strategy)
+    await s.write("memory/u1/a", b"a", vector=[1, 0, 0])
+    results = await s.search(SearchQuery(vector=[1, 0, 0], top_k=1, pk="memory/u1"))
+    assert [r.key for r in results] == ["memory/u1/a"]
+    assert strategy.searched == []
+
+
+async def test_namespace_shares_the_search_strategy(aws):
+    strategy = RecordingStrategy()
+    view = make(aws, search_strategy=strategy).namespace("user/u1").namespace("notes")
+    await view.write("n1", b"v")
+    await view.search("window")
+    assert strategy.indexed == [(view, "n1", b"v")]
+    assert strategy.searched == [(view, "window")]
+
+
+@needs_keyword_search
+async def test_string_search_without_a_strategy_uses_keyword_search(aws):
+    s = make(aws)
+    view = s.namespace("user/u1")
+    await view.write("notes/seat", b"Prefers a window seat")
+    await view.write("notes/food", b"Has a peanut allergy")
+    await view.write("notes/both", b"Window seat, peanut-free meal")
+    await s.write("user/u2/notes/seat", b"Also likes a window seat")
+    results = await view.search("window seat")
+    assert {(r.key, r.score) for r in results} == {("notes/seat", 2), ("notes/both", 2)}
+    assert {r.data for r in results} == {b"Prefers a window seat", b"Window seat, peanut-free meal"}
+    assert await view.search("the") == []
+
+
+@needs_keyword_search
+async def test_keyword_search_on_a_broad_storage_is_rejected_by_list(aws):
+    with pytest.raises(StorageError, match="too broad"):
+        await make(aws).search("window")
+
+
+async def test_keyword_search_requires_an_sdk_that_has_it(aws):
+    with mock.patch.dict(sys.modules, {"strands.storage.search": None}):
+        with pytest.raises(StorageError, match="strands-agents 1.54.0 or later"):
+            await make(aws).namespace("user/u1").search("window")

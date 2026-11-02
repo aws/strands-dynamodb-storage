@@ -81,6 +81,18 @@ export type VectorSearchAdapter = (params: {
   filter?: Record<string, string | number | boolean>
 }) => Promise<Array<{ key: string; score: number; metadata?: Record<string, unknown>; expireAt?: number }>>
 
+/**
+ * Search strategy for a plain-string {@link DynamoDBStorage.search}, such as the SDK's
+ * `KeywordSearchStrategy` or any `SearchStrategy<DynamoDBStorage>`. `index`, when present,
+ * runs after each write.
+ */
+export interface DynamoDBSearchStrategy {
+  /** Indexes a written value; `key` is relative to `storage`. */
+  index?(storage: DynamoDBStorage, key: string, data: Uint8Array): Promise<void>
+  /** Returns matching keys, ranked best-first. */
+  search(storage: DynamoDBStorage, query: string): Promise<SearchResult[]>
+}
+
 /** Configuration for {@link DynamoDBStorage}. */
 export interface DynamoDBStorageConfig {
   /** AWS region override. Ignored when `client` is supplied. */
@@ -127,6 +139,13 @@ export interface DynamoDBStorageConfig {
   vectorAttribute?: string
   /** Optional override of the native `SearchVectors` call (testing, custom routing). When unset, `search()` calls DynamoDB natively. */
   vectorSearch?: VectorSearchAdapter
+  /**
+   * Strategy for a plain-string `search()`. When set, `write()` indexes each value through it
+   * and a string query delegates to it; when unset, a string query uses the SDK's keyword
+   * search. Shared with `namespace()` views. A {@link SearchQuery} always uses the native
+   * vector index.
+   */
+  searchStrategy?: DynamoDBSearchStrategy
 }
 
 /** User-Agent marker on every AWS client this package creates. */
@@ -144,6 +163,21 @@ const Z_ATTR = 'z'
 const MAX_TOP_K = 100
 /** Over-fetch factor for client-side metadata filtering, capped at MAX_TOP_K. */
 const FILTER_OVERFETCH = 10
+
+type StorageSearchModule = typeof import('@strands-agents/sdk/storage/search')
+
+/** Loads the SDK's search module, which `@strands-agents/sdk` releases before 1.14.0 do not have. */
+async function loadStorageSearch(): Promise<StorageSearchModule> {
+  try {
+    return await import('@strands-agents/sdk/storage/search')
+  } catch (error: unknown) {
+    throw new StorageError(
+      'Plain-string DynamoDBStorage.search needs @strands-agents/sdk 1.14.0 or later for keyword search. ' +
+        'Upgrade @strands-agents/sdk, set searchStrategy, or embed the text and pass { vector, topK }.',
+      { cause: error }
+    )
+  }
+}
 
 /**
  * DynamoDB {@link Storage} backend (single-table design).
@@ -189,6 +223,7 @@ export class DynamoDBStorage implements Storage<string | DynamoDBListQuery> {
   private readonly _ttlSeconds: number | undefined
   private readonly _ttlEnabled: boolean
   private readonly _ttlAttribute: string
+  private readonly _searchStrategy: DynamoDBSearchStrategy | undefined
   private _client: import('@aws-sdk/lib-dynamodb').DynamoDBDocumentClient | undefined
   private _s3Client: import('@aws-sdk/client-s3').S3Client | undefined
 
@@ -215,15 +250,18 @@ export class DynamoDBStorage implements Storage<string | DynamoDBListQuery> {
     this._ttlSeconds = config?.ttlSeconds
     this._ttlEnabled = config?.ttlSeconds !== undefined
     this._ttlAttribute = config?.ttlAttribute ?? 'expireAt'
+    this._searchStrategy = config?.searchStrategy
   }
 
   /**
    * Stores `data` under `key`, overwriting any existing value. Values above the
    * item-size limit are offloaded to S3 when an `s3Bucket` is configured. An optional
-   * `vector` (kept inline for the native index) and `metadata` enable `search`.
+   * `vector` (kept inline for the native index) and `metadata` enable `search`. With a
+   * `searchStrategy`, the value is then indexed through it.
    *
    * @throws {@link StorageError} if the key is invalid, the value is oversized with
-   *   no S3 bucket configured, or the write fails
+   *   no S3 bucket configured, the write fails, or the search strategy fails to index the
+   *   value (the value is stored in that case)
    */
   async write(
     key: string,
@@ -292,6 +330,15 @@ export class DynamoDBStorage implements Storage<string | DynamoDBListQuery> {
     } catch (error: unknown) {
       if (error instanceof StorageError) throw error
       throw new StorageError(`Failed to write '${normalized}' to DynamoDB table '${this._tableName}'`, { cause: error })
+    }
+    if (this._searchStrategy?.index) {
+      try {
+        await this._searchStrategy.index(this, normalized, data)
+      } catch (error: unknown) {
+        throw new StorageError(`Stored '${normalized}' in DynamoDB table '${this._tableName}' but indexing it failed`, {
+          cause: error,
+        })
+      }
     }
   }
 
@@ -389,9 +436,9 @@ export class DynamoDBStorage implements Storage<string | DynamoDBListQuery> {
    * mutating the original.
    *
    * Unlike the SDK's generic string-only namespace helper, this returns a real
-   * `DynamoDBStorage` sharing the same client and settings, so structured
-   * {@link DynamoDBListQuery} listing and {@link DynamoDBStorage.search} survive
-   * namespacing. Nested calls compose.
+   * `DynamoDBStorage` sharing the same client, settings, and search strategy, so
+   * structured {@link DynamoDBListQuery} listing and {@link DynamoDBStorage.search}
+   * survive namespacing. Nested calls compose.
    */
   namespace(prefix: string): DynamoDBStorage {
     const sub = normalizePrefix(prefix)
@@ -409,6 +456,7 @@ export class DynamoDBStorage implements Storage<string | DynamoDBListQuery> {
     if (this._compress) config.compression = 'gzip'
     if (this._ttlSeconds !== undefined) config.ttlSeconds = this._ttlSeconds
     config.ttlAttribute = this._ttlAttribute
+    if (this._searchStrategy) config.searchStrategy = this._searchStrategy
     return new DynamoDBStorage(this._tableName, config)
   }
 
@@ -425,8 +473,9 @@ export class DynamoDBStorage implements Storage<string | DynamoDBListQuery> {
   }
 
   /**
-   * Nearest-neighbour vector search over items written with a `vector`.
+   * Nearest-neighbour search for a {@link SearchQuery}, or text search for a string.
    *
+   * A {@link SearchQuery} searches the native vector index over items written with a `vector`.
    * Optional part of the {@link Storage} contract — consumers feature-detect
    * `if (storage.search)` and fall back to client-side KNN when absent. On DynamoDB
    * this runs against the native vector index, so scoring happens in the database.
@@ -445,15 +494,33 @@ export class DynamoDBStorage implements Storage<string | DynamoDBListQuery> {
    * TTL attribute, or an adapter that does not return it) is kept. Expired matches are
    * not back-filled, so a search can return fewer than `topK` results.
    *
-   * This store does not embed text. A plain-string query, which the SDK's `Storage`
-   * contract allows, is rejected: use {@link DynamoDBMemoryStore} for text search, or
-   * embed the text and pass a {@link SearchQuery}.
+   * A plain-string query, which the SDK's `Storage` contract allows, goes to the
+   * `searchStrategy`, or without one to the SDK's keyword search (which needs
+   * `@strands-agents/sdk` 1.14.0 or later). Keyword search lists every key, so it works on a
+   * namespace at least two segments deep, such as `storage.namespace('user/u1')`; on a
+   * broader storage the listing is rejected as too broad. Its results are ranked best-first
+   * with higher scores more relevant. For search by meaning over the native vector index, use
+   * {@link DynamoDBMemoryStore}, or embed the text and pass a {@link SearchQuery}.
    *
-   * @throws {@link StorageError} if the query is a plain string, the search fails, or
-   *   `topK` is out of range
+   * @throws {@link StorageError} if the search or the search strategy fails, or `topK` is
+   *   out of range
    */
   async search(query: SearchQuery | string): Promise<SearchResult[]> {
+    if (typeof query === 'string') return this._searchText(query)
     return this._search(query)
+  }
+
+  /** Searches by text through the search strategy, or keyword search without one. */
+  private async _searchText(query: string): Promise<SearchResult[]> {
+    if (this._searchStrategy) {
+      try {
+        return await this._searchStrategy.search(this, query)
+      } catch (error: unknown) {
+        throw new StorageError(`Failed to search DynamoDB table '${this._tableName}'`, { cause: error })
+      }
+    }
+    const { KeywordSearchStrategy } = await loadStorageSearch()
+    return KeywordSearchStrategy.search(this, query)
   }
 
   /**
@@ -462,16 +529,7 @@ export class DynamoDBStorage implements Storage<string | DynamoDBListQuery> {
    * offloaded or unprojected match that the caller would discard costs no point read.
    * Reached through {@link searchUnderKeyPrefix}.
    */
-  private async _search(query: SearchQuery | string, keyPrefix?: string): Promise<SearchResult[]> {
-    if (typeof query === 'string') {
-      // The Storage contract lets consumers pass a natural-language string; this
-      // store has no embedding model, so it cannot honour one.
-      throw new StorageError(
-        'DynamoDBStorage.search requires a SearchQuery with a pre-computed embedding vector. ' +
-          'Plain-string queries are not supported: embed the text first and pass { vector, topK }, ' +
-          'or use DynamoDBMemoryStore, which embeds text for you.'
-      )
-    }
+  private async _search(query: SearchQuery, keyPrefix?: string): Promise<SearchResult[]> {
     if (query.pk !== undefined) this._assertPkInScope(query.pk)
     try {
       const matches: Array<{

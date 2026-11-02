@@ -3,7 +3,7 @@
 An **Amazon DynamoDB `Storage` backend** for the [Strands Agents](https://github.com/strands-agents/harness-sdk) TypeScript SDK.
 
 It implements the SDK's unified byte `Storage` interface (`write` / `read` / `delete` / `list` / `namespace`), so one
-DynamoDB-backed instance can be passed to **Session Manager, Memory Manager**, the context offloader, transcripts, and
+DynamoDB-backed instance can be passed to **Session Manager, Memory Manager**, the context manager's stash, transcripts, and
 any other subsystem that persists bytes — no per-subsystem code. On top of the byte contract it adds S3 offload for large
 values, optional gzip compression, TTL, and optional **native vector search**.
 
@@ -47,15 +47,23 @@ const agent = new Agent({ sessionManager: new SessionManager({ storage }) })
 // sessions now persist to DynamoDB — nothing else to wire.
 ```
 
-The same instance backs any subsystem that accepts a `Storage` — for example, offloading oversized
-tool results with the context offloader:
+The same instance backs any subsystem that accepts a `Storage` — for example, stashing oversized
+tool results with the context manager (experimental, `@strands-agents/sdk` 1.18.0 or later):
 
 ```ts
-import { Agent } from '@strands-agents/sdk'
-import { ContextOffloader } from '@strands-agents/sdk/vended-plugins/context-offloader'
+import { Agent, Offload } from '@strands-agents/sdk'
 
-const agent = new Agent({ plugins: [new ContextOffloader({ storage })] })
+const agent = new Agent({
+  contextManager: {
+    stash: { storage },
+    strategies: [Offload.truncate('toolResults', { previewTokens: 1000, preview: 'head' }).when({ threshold: 2500 })],
+  },
+})
 ```
+
+The stash keeps each original under `context/<sessionId>/scopes/agent/<agentId>/` and registers a `retrieve_context`
+tool to read it back. Without `stash`, the stash uses the agent's `storage`, so
+`new Agent({ storage, contextManager: 'auto' })` stashes in DynamoDB with the SDK's tuned defaults.
 
 ## Direct byte usage
 
@@ -194,8 +202,9 @@ const cohere = new DynamoDBMemoryStore(storage, {
   embedder: new BedrockEmbedder({ modelId: 'us.cohere.embed-v4:0', dimensions: 1024 }),
 })
 
-// Any other model: a function from text to an array of numbers (sync or async), or an object
-// with an `embed(text, purpose)` method (sync or async) where purpose is 'document' or 'query'.
+// Any other model: a function from text to an array of numbers (sync or async), an object with an
+// `embed(text, purpose)` method (sync or async) where purpose is 'document' or 'query', or a Strands SDK
+// `Embedder` from '@strands-agents/sdk/storage/search', whose `embed(text)` takes only the text.
 // Convert a Float32Array with Array.from.
 const custom = new DynamoDBMemoryStore(storage, { embedder: async (text) => Array.from(await myModel.embed(text)) })
 ```
@@ -214,7 +223,11 @@ accepts up to about 128,000 tokens per text.
 `search()` is the lower-level API under the memory store: write each item with its embedding, then query by vector.
 It is an optional, feature-detected part of the `Storage` contract (`if (storage.search) { … }`). The storage searches
 pre-computed embedding vectors and does not embed text: pass a `SearchQuery` with a `vector`, as every example does. A
-plain-string query is rejected with a `StorageError` at runtime; for text search, use `DynamoDBMemoryStore`.
+plain-string query goes to the `searchStrategy` in the config, which also indexes every write and is shared with
+`namespace()` views. Without one, it uses the SDK's `KeywordSearchStrategy` (`@strands-agents/sdk` 1.14.0 or later),
+which lists every key and so works on a namespace at least two segments deep, such as `storage.namespace('user/u1')`; on
+a broader storage the listing is rejected as too broad. Keyword scores rank higher as more relevant, unlike vector
+scores. For search by meaning, use `DynamoDBMemoryStore`.
 On DynamoDB the search runs against the **native vector
 index**, so nearest-neighbour scoring happens _in the database_ -- no second vector store, no ETL -- and because the index
 is partitioned on `pk`, every search is scoped to the caller's key space. Creating the table with a vector index (and the

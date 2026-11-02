@@ -4,8 +4,8 @@
 """Amazon DynamoDB storage backend for the Strands Agents SDK.
 
 Implements the SDK's unified byte ``Storage`` interface, so one DynamoDB-backed
-instance persists any subsystem's data (Session Manager, Memory Manager, offloader,
-transcripts) — with optional S3 offload, gzip compression, TTL, and native vector search.
+instance persists any subsystem's data (Session Manager, Memory Manager, the context
+manager's stash, transcripts) — with optional S3 offload, gzip compression, TTL, and native vector search.
 
 :class:`DynamoDBMemoryStore` implements the SDK's ``MemoryStore`` for the Memory Manager
 on top of that vector search, embedding text with :class:`BedrockEmbedder` or a function

@@ -1,7 +1,7 @@
 # Transparent S3 offload for oversized values
 
 Agent workloads produce oversized values routinely: a tool returns a whole
-web page, a session accumulates a long transcript, a context offloader parks
+web page, a session accumulates a long transcript, the context manager stashes
 a large intermediate result. DynamoDB items cap at 400 KB. This example makes
 that cap invisible to the application.
 
@@ -65,12 +65,40 @@ after delete: S3 objects remaining: 0
 
 ## Where this matters in an agent
 
-The Strands SDK's context offloader plugin parks oversized tool results
-through the same `Storage` contract, so an agent constructed with this store
-(`Agent(storage=storage, plugins=[ContextOffloader()])`) gets the S3
-spillover for free: big tool outputs leave the model context and land wherever
-the payload size says they should, with nothing in the agent code aware of
-the split.
+The Strands SDK's context manager stashes oversized tool results through the
+same `Storage` contract, and by default its stash uses the agent's `storage`.
+An agent constructed with this store gets the S3 spillover for free: big tool
+outputs leave the model context and land wherever the payload size says they
+should, with nothing in the agent code aware of the split.
+
+```python
+from strands import Agent
+from strands.experimental.context_manager import Offload
+
+agent = Agent(
+    storage=storage,
+    context_manager={
+        "strategies": [Offload.truncate("tool_results", {"preview_tokens": 1000, "preview": "head"}).when(threshold=2500)],
+    },
+)
+```
+
+```typescript
+import { Agent, Offload } from '@strands-agents/sdk'
+
+const agent = new Agent({
+  storage,
+  contextManager: {
+    strategies: [Offload.truncate('toolResults', { previewTokens: 1000, preview: 'head' }).when({ threshold: 2500 })],
+  },
+})
+```
+
+`context_manager="auto"` / `contextManager: 'auto'` uses the SDK's tuned
+defaults instead. The context manager is experimental and needs
+`strands-agents` 1.55.0 or `@strands-agents/sdk` 1.18.0 or later. The stash
+writes under `context/<session_id>/scopes/agent/<agent_id>/`, inside the
+store's `prefix`.
 
 ## Considerations
 

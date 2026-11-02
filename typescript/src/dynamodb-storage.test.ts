@@ -8,7 +8,13 @@ import { marshall } from '@aws-sdk/util-dynamodb'
 import { PutObjectCommand, GetObjectCommand, DeleteObjectCommand, type S3Client } from '@aws-sdk/client-s3'
 import { StorageError } from '@strands-agents/sdk'
 import type { Storage } from '@strands-agents/sdk/storage'
-import { DynamoDBStorage, type VectorSearchAdapter } from './dynamodb-storage.js'
+import { KeywordSearchStrategy } from '@strands-agents/sdk/storage/search'
+import {
+  DynamoDBStorage,
+  type DynamoDBSearchStrategy,
+  type SearchResult,
+  type VectorSearchAdapter,
+} from './dynamodb-storage.js'
 import * as pkgIndex from './index.js'
 
 /**
@@ -423,10 +429,19 @@ describe('DynamoDBStorage — vector search', () => {
     expect(typeof contract.search).toBe('function')
   })
 
-  it('rejects a plain-string query with an actionable error', async () => {
+  it('answers a plain-string query with keyword search', async () => {
     const { storage } = newStorage({ vector: true })
-    await expect(storage.search('what are this user preferences?')).rejects.toBeInstanceOf(StorageError)
-    await expect(storage.search('what are this user preferences?')).rejects.toThrow(/pre-computed embedding vector/)
+    const scoped = storage.namespace('user/u1')
+    await scoped.write('notes/seat', bytes('prefers a window seat'))
+    await scoped.write('notes/drink', bytes('drinks black coffee'))
+    const results = await scoped.search('window')
+    expect(results.map((r) => r.key)).toEqual(['notes/seat'])
+    expect(results[0]!.score).toBeGreaterThan(0)
+  })
+
+  it('rejects keyword search over a storage broader than two key segments', async () => {
+    const { storage } = newStorage({ vector: true })
+    await expect(storage.search('window')).rejects.toThrow(/too broad/)
   })
 
   it('stores the embedding inline when a vector is written', async () => {
@@ -908,5 +923,105 @@ describe('DynamoDBStorage — namespace isolation', () => {
       data: bytes('x'),
     })
     expect(await b.list({ pk: 'tenant-b/sessions' })).toEqual(['sessions/s1/mine'])
+  })
+})
+
+/** Records the calls a {@link DynamoDBStorage} makes to its search strategy. */
+class RecordingStrategy implements DynamoDBSearchStrategy {
+  readonly indexed: Array<{ storage: DynamoDBStorage; key: string; data: string }> = []
+  readonly searches: Array<{ storage: DynamoDBStorage; query: string }> = []
+  indexError: Error | undefined
+  searchError: Error | undefined
+  constructor(private readonly _results: SearchResult[] = []) {}
+  async index(storage: DynamoDBStorage, key: string, data: Uint8Array): Promise<void> {
+    if (this.indexError) throw this.indexError
+    this.indexed.push({ storage, key, data: new TextDecoder().decode(data) })
+  }
+  async search(storage: DynamoDBStorage, query: string): Promise<SearchResult[]> {
+    if (this.searchError) throw this.searchError
+    this.searches.push({ storage, query })
+    return this._results
+  }
+}
+
+function strategyStorage(strategy: DynamoDBSearchStrategy) {
+  const client = new FakeDocumentClient()
+  const storage = new DynamoDBStorage('test-table', {
+    client: asDocClient(client),
+    vectorSearch: cosineAdapter(client),
+    searchStrategy: strategy,
+  })
+  return { client, storage }
+}
+
+describe('DynamoDBStorage — search strategy', () => {
+  it('accepts the SDK keyword search strategy', async () => {
+    const { storage } = strategyStorage(KeywordSearchStrategy)
+    const scoped = storage.namespace('user/u1')
+    await scoped.write('notes/seat', bytes('prefers a window seat'))
+    expect((await scoped.search('window')).map((r) => r.key)).toEqual(['notes/seat'])
+  })
+
+  it('indexes each written value through the strategy', async () => {
+    const strategy = new RecordingStrategy()
+    const { storage } = strategyStorage(strategy)
+    await storage.write('sessions/s1/a', bytes('hello'))
+    expect(strategy.indexed).toEqual([{ storage, key: 'sessions/s1/a', data: 'hello' }])
+  })
+
+  it('keeps the value when indexing fails and reports the failure', async () => {
+    const strategy = new RecordingStrategy()
+    strategy.indexError = new Error('index down')
+    const { storage } = strategyStorage(strategy)
+    const write = storage.write('sessions/s1/a', bytes('hello'))
+    await expect(write).rejects.toBeInstanceOf(StorageError)
+    await expect(write).rejects.toThrow(
+      /Stored 'sessions\/s1\/a' in DynamoDB table 'test-table' but indexing it failed/
+    )
+    await expect(write).rejects.toHaveProperty('cause', strategy.indexError)
+    expect(str(await storage.read('sessions/s1/a'))).toBe('hello')
+  })
+
+  it('does not index a value whose write failed', async () => {
+    const strategy = new RecordingStrategy()
+    const { storage } = strategyStorage(strategy)
+    await expect(storage.write('../escape', bytes('x'))).rejects.toBeInstanceOf(StorageError)
+    expect(strategy.indexed).toEqual([])
+  })
+
+  it('delegates a plain-string search to the strategy', async () => {
+    const results = [{ key: 'sessions/s1/a', score: 2 }]
+    const strategy = new RecordingStrategy(results)
+    const { storage } = strategyStorage(strategy)
+    expect(await storage.search('hello')).toBe(results)
+    expect(strategy.searches).toEqual([{ storage, query: 'hello' }])
+  })
+
+  it('wraps a strategy search failure in a StorageError', async () => {
+    const strategy = new RecordingStrategy()
+    strategy.searchError = new Error('search down')
+    const { storage } = strategyStorage(strategy)
+    const search = storage.search('hello')
+    await expect(search).rejects.toThrow("Failed to search DynamoDB table 'test-table'")
+    await expect(search).rejects.toHaveProperty('cause', strategy.searchError)
+  })
+
+  it('answers a SearchQuery from the vector index, not the strategy', async () => {
+    const strategy = new RecordingStrategy()
+    const { storage } = strategyStorage(strategy)
+    await storage.write('memory/u1/m1', bytes('window'), { vector: [1, 0, 0] })
+    const results = await storage.search({ vector: [1, 0, 0], topK: 1 })
+    expect(results.map((r) => r.key)).toEqual(['memory/u1/m1'])
+    expect(strategy.searches).toEqual([])
+  })
+
+  it('shares the strategy with namespace views', async () => {
+    const strategy = new RecordingStrategy()
+    const { storage } = strategyStorage(strategy)
+    const view = storage.namespace('user/u1')
+    await view.write('notes/a', bytes('hi'))
+    await view.search('hi')
+    expect(strategy.indexed.map((call) => [call.storage, call.key])).toEqual([[view, 'notes/a']])
+    expect(strategy.searches.map((call) => call.storage)).toEqual([view])
   })
 })

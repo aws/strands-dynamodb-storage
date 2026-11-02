@@ -79,7 +79,7 @@
     "@aws-sdk/lib-dynamodb": "^3.1104.0",
     "@aws-sdk/util-dynamodb": "^3.996.7",
     "@eslint/js": "^10.0.1",
-    "@strands-agents/sdk": "^1.14.0",
+    "@strands-agents/sdk": "^1.23.0",
     "@types/node": "^22.0.0",
     "@typescript-eslint/eslint-plugin": "^8.0.0",
     "@typescript-eslint/parser": "^8.0.0",

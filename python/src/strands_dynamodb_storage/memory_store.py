@@ -17,7 +17,7 @@ from strands.memory import MemoryEntry, MemoryStore, SearchOptions
 from strands.types.exceptions import StorageError
 
 from .dynamodb_storage import _MAX_TOP_K, DynamoDBStorage, SearchQuery
-from .embedders import BedrockEmbedder, Embedder, EmbeddingPurpose, EmbedFunction, _is_finite_number
+from .embedders import BedrockEmbedder, Embedder, EmbeddingPurpose, EmbedFunction, _is_finite_number, _TextEmbedder
 
 if TYPE_CHECKING:
     from strands.memory import ExtractionConfig
@@ -66,7 +66,7 @@ class DynamoDBMemoryStore(MemoryStore):
         self,
         storage: DynamoDBStorage,
         *,
-        embedder: Union[Embedder, EmbedFunction, None] = None,
+        embedder: Union[Embedder, _TextEmbedder, EmbedFunction, None] = None,
         name: str = "dynamodb",
         description: Optional[str] = "Long-term memories stored in Amazon DynamoDB, searched by meaning",
         max_search_results: Optional[int] = None,
@@ -78,10 +78,12 @@ class DynamoDBMemoryStore(MemoryStore):
         Args:
             storage: The ``DynamoDBStorage`` (usually a namespaced view) to keep memories in.
                 Its table needs the vector index described in the package README.
-            embedder: An :class:`Embedder` such as :class:`BedrockEmbedder`, or a plain
-                function from text to vector. Defaults to ``BedrockEmbedder()`` (Amazon
-                Titan Text Embeddings V2, 1024 dimensions) in the storage's Region, with
-                its ``boto_session`` and ``boto_client_config``.
+            embedder: An :class:`Embedder` such as :class:`BedrockEmbedder`, an object whose
+                ``embed`` takes only the text (such as a Strands SDK
+                ``strands.storage.search.Embedder``), or a plain function from text to
+                vector. Defaults to ``BedrockEmbedder()`` (Amazon Titan Text Embeddings V2,
+                1024 dimensions) in the storage's Region, with its ``boto_session`` and
+                ``boto_client_config``.
             name: Store name, unique within a ``MemoryManager``; also the key segment
                 ``memory/<name>/``. Must not be ``.`` or ``..`` or contain ``/``, control
                 characters, lone surrogates, or leading or trailing whitespace.
@@ -141,6 +143,7 @@ class DynamoDBMemoryStore(MemoryStore):
             region, session, client_config = storage._aws_defaults()
             embedder = BedrockEmbedder(region_name=region, boto_session=session, boto_client_config=client_config)
         self._embedder = embedder
+        self._embed_takes_purpose = _takes_purpose(getattr(embedder, "embed", None))
 
     async def search(self, query: str, options: Optional[SearchOptions] = None) -> builtins.list[MemoryEntry]:
         """Return the stored memories closest in meaning to ``query``, closest first.
@@ -233,10 +236,12 @@ class DynamoDBMemoryStore(MemoryStore):
             # getattr, not isinstance(embedder, Embedder): from Python 3.12 the Protocol check
             # skips attributes resolved by __getattr__ (as on unittest.mock objects).
             embed = getattr(embedder, "embed", None)
-            if callable(embed):
-                result: Any = await _call(embed, text, purpose)
+            if not callable(embed):
+                result: Any = await _call(embedder, text)
+            elif self._embed_takes_purpose:
+                result = await _call(embed, text, purpose)
             else:
-                result = await _call(embedder, text)
+                result = await _call(embed, text)
         except StorageError:
             raise
         except Exception as error:
@@ -352,6 +357,20 @@ async def _call(function: Any, *args: Any) -> Any:
     if inspect.isawaitable(result):
         result = await result
     return result
+
+
+def _takes_purpose(embed: Any) -> bool:
+    """Whether an ``embed`` method takes the purpose as a second positional argument.
+
+    The SDK's ``Embedder.embed`` takes only the text. A signature that cannot be read is
+    assumed to take the purpose, as the :class:`Embedder` protocol does.
+    """
+    try:
+        parameters = inspect.signature(embed).parameters.values()
+    except (TypeError, ValueError):
+        return True
+    positional = [p for p in parameters if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)]
+    return len(positional) >= 2 or any(p.kind is p.VAR_POSITIONAL for p in parameters)
 
 
 def _check_limit(value: Any, label: str) -> None:

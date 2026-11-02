@@ -22,15 +22,24 @@ storage = DynamoDBStorage("agent-data", region_name="us-east-1")
 agent = Agent(session_manager=SnapshotSessionManager(storage=storage))
 ```
 
-The same instance backs any subsystem that accepts a `Storage`, for example offloading oversized
-tool results with the context offloader:
+The same instance backs any subsystem that accepts a `Storage`, for example stashing oversized
+tool results with the context manager (experimental, `strands-agents` 1.55.0 or later):
 
 ```python
 from strands import Agent
-from strands.vended_plugins.context_offloader import ContextOffloader
+from strands.experimental.context_manager import Offload
 
-agent = Agent(plugins=[ContextOffloader(storage=storage)])
+agent = Agent(
+    context_manager={
+        "stash": {"storage": storage},
+        "strategies": [Offload.truncate("tool_results", {"preview_tokens": 1000, "preview": "head"}).when(threshold=2500)],
+    }
+)
 ```
+
+The stash keeps each original under `context/<session_id>/scopes/agent/<agent_id>/` and registers a
+`retrieve_context` tool to read it back. Without `stash`, the stash uses the agent's `storage`, so
+`Agent(storage=storage, context_manager="auto")` stashes in DynamoDB with the SDK's tuned defaults.
 
 Direct byte usage (async):
 
@@ -128,9 +137,9 @@ from strands_dynamodb_storage import BedrockEmbedder
 # queries with separate input types.
 memory = DynamoDBMemoryStore(storage, embedder=BedrockEmbedder("us.cohere.embed-v4:0", dimensions=1024))
 
-# Any other model: a function from text to a list of floats (sync or async), or an object
-# with an `embed(self, text, purpose)` method (sync or async) where purpose is "document" or
-# "query".
+# Any other model: a function from text to a list of floats (sync or async), an object with an
+# `embed(self, text, purpose)` method (sync or async) where purpose is "document" or "query", or
+# a Strands SDK `strands.storage.search.Embedder`, whose `embed(text)` takes only the text.
 memory = DynamoDBMemoryStore(storage, embedder=lambda text: my_model.encode(text).tolist())
 ```
 
@@ -190,8 +199,20 @@ for r in results:
 # (COSINE/EUCLIDEAN: lower = nearer; DOT_PRODUCT: higher = more similar)
 ```
 
-`search()` takes a `SearchQuery` only; a plain-string query raises `StorageError`, because the
-storage does not embed text. Like a global secondary index, the vector index is eventually
+A plain-string `search()` does not embed the text. It goes to the `search_strategy` passed to the
+constructor, which also indexes every write and is shared with `namespace()` views. Without one,
+it uses the SDK's `KeywordSearchStrategy` (`strands-agents` 1.54.0 or later), which lists every key
+and so works on a namespace at least two segments deep, such as `store.namespace("user/u1")`; on a
+broader storage the listing is rejected as too broad. Keyword scores rank higher as more relevant,
+unlike vector scores. For search by meaning, use `DynamoDBMemoryStore` or pass a `SearchQuery`.
+
+```python
+from strands.storage.search import KeywordSearchStrategy
+
+store = DynamoDBStorage("agent-data", search_strategy=KeywordSearchStrategy())
+```
+
+Like a global secondary index, the vector index is eventually
 consistent, and a freshly created index backfills before it is searchable. Requires `boto3 >= 1.43.64`; a
 `vector_search` adapter, when configured, overrides the native call (testing, custom routing).
 
