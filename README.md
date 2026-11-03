@@ -66,11 +66,10 @@ Create a table with a string partition key `pk` and a string sort key `sk`, then
 
 Set `storage` once on the `Agent` and every subsystem that accepts a `Storage` — session persistence, the context manager's stash — uses it, each under its own prefix (`session/`, `context/<session_id>/scopes/agent/<agent_id>/`). Storage passed directly to a subsystem still takes precedence. Agent-level storage is a shared backend, not a switch: session state persists only once you add a session manager, which then inherits the store.
 
-The context manager is experimental in the SDK and needs `strands-agents` 1.55.0 or later in Python and `@strands-agents/sdk` 1.18.0 or later in TypeScript. `context_manager="auto"` / `contextManager: 'auto'` picks tuned defaults instead of the explicit strategy below.
+The context manager is experimental in the SDK and needs `strands-agents` 1.55.0 or later in Python and `@strands-agents/sdk` 1.18.0 or later in TypeScript.
 
 ```python
 from strands import Agent
-from strands.experimental.context_manager import Offload
 from strands.session import SnapshotSessionManager
 from strands_dynamodb_storage import DynamoDBStorage
 
@@ -80,15 +79,12 @@ storage = DynamoDBStorage("agent-storage", region_name="us-east-1")
 agent = Agent(
     storage=storage,
     session_manager=SnapshotSessionManager(),  # persists under session/
-    context_manager={
-        # Stashes oversized tool results under context/<session_id>/, keeping a preview in context.
-        "strategies": [Offload.truncate("tool_results", {"preview_tokens": 1000, "preview": "head"}).when(threshold=2500)],
-    },
+    context_manager="auto",  # stashes oversized tool results under context/
 )
 ```
 
 ```typescript
-import { Agent, Offload, SessionManager } from '@strands-agents/sdk'
+import { Agent, SessionManager } from '@strands-agents/sdk'
 import { DynamoDBStorage } from 'strands-dynamodb-storage'
 
 const storage = new DynamoDBStorage('agent-storage', { region: 'us-east-1' })
@@ -97,10 +93,7 @@ const storage = new DynamoDBStorage('agent-storage', { region: 'us-east-1' })
 const agent = new Agent({
   storage,
   sessionManager: new SessionManager({}), // persists under session/
-  contextManager: {
-    // Stashes oversized tool results under context/<sessionId>/, keeping a preview in context.
-    strategies: [Offload.truncate('toolResults', { previewTokens: 1000, preview: 'head' }).when({ threshold: 2500 })],
-  },
+  contextManager: 'auto', // stashes oversized tool results under context/
 })
 ```
 
@@ -154,14 +147,8 @@ results in DynamoDB through the context manager (experimental, `strands-agents` 
 
 ```python
 from strands import Agent
-from strands.experimental.context_manager import Offload
 
-agent = Agent(
-    context_manager={
-        "stash": {"storage": storage},
-        "strategies": [Offload.truncate("tool_results", {"preview_tokens": 1000, "preview": "head"}).when(threshold=2500)],
-    }
-)
+agent = Agent(storage=storage, context_manager="auto")
 ```
 
 Or use the byte contract directly:
@@ -197,14 +184,9 @@ The same instance plugs into every SDK subsystem that accepts a `Storage`. Stash
 results in DynamoDB through the context manager (experimental, `@strands-agents/sdk` 1.18.0 or later):
 
 ```typescript
-import { Agent, Offload } from '@strands-agents/sdk'
+import { Agent } from '@strands-agents/sdk'
 
-const agent = new Agent({
-  contextManager: {
-    stash: { storage },
-    strategies: [Offload.truncate('toolResults', { previewTokens: 1000, preview: 'head' }).when({ threshold: 2500 })],
-  },
-})
+const agent = new Agent({ storage, contextManager: 'auto' })
 ```
 
 Or use the byte contract directly:

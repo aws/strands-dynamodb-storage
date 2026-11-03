@@ -27,19 +27,11 @@ tool results with the context manager (experimental, `strands-agents` 1.55.0 or 
 
 ```python
 from strands import Agent
-from strands.experimental.context_manager import Offload
 
-agent = Agent(
-    context_manager={
-        "stash": {"storage": storage},
-        "strategies": [Offload.truncate("tool_results", {"preview_tokens": 1000, "preview": "head"}).when(threshold=2500)],
-    }
-)
+agent = Agent(storage=storage, context_manager="auto")
 ```
 
-The stash keeps each original under `context/<session_id>/scopes/agent/<agent_id>/` and registers a
-`retrieve_context` tool to read it back. Without `stash`, the stash uses the agent's `storage`, so
-`Agent(storage=storage, context_manager="auto")` stashes in DynamoDB with the SDK's tuned defaults.
+The stash uses the agent's `storage` and registers a `retrieve_context` tool to read originals back.
 
 Direct byte usage (async):
 

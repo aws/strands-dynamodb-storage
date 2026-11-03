@@ -73,29 +73,17 @@ should, with nothing in the agent code aware of the split.
 
 ```python
 from strands import Agent
-from strands.experimental.context_manager import Offload
 
-agent = Agent(
-    storage=storage,
-    context_manager={
-        "strategies": [Offload.truncate("tool_results", {"preview_tokens": 1000, "preview": "head"}).when(threshold=2500)],
-    },
-)
+agent = Agent(storage=storage, context_manager="auto")
 ```
 
 ```typescript
-import { Agent, Offload } from '@strands-agents/sdk'
+import { Agent } from '@strands-agents/sdk'
 
-const agent = new Agent({
-  storage,
-  contextManager: {
-    strategies: [Offload.truncate('toolResults', { previewTokens: 1000, preview: 'head' }).when({ threshold: 2500 })],
-  },
-})
+const agent = new Agent({ storage, contextManager: 'auto' })
 ```
 
-`context_manager="auto"` / `contextManager: 'auto'` uses the SDK's tuned
-defaults instead. The context manager is experimental and needs
+The context manager is experimental and needs
 `strands-agents` 1.55.0 or `@strands-agents/sdk` 1.18.0 or later. The stash
 writes under `context/<session_id>/scopes/agent/<agent_id>/`, inside the
 store's `prefix`.

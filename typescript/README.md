@@ -51,19 +51,12 @@ The same instance backs any subsystem that accepts a `Storage` — for example, 
 tool results with the context manager (experimental, `@strands-agents/sdk` 1.18.0 or later):
 
 ```ts
-import { Agent, Offload } from '@strands-agents/sdk'
+import { Agent } from '@strands-agents/sdk'
 
-const agent = new Agent({
-  contextManager: {
-    stash: { storage },
-    strategies: [Offload.truncate('toolResults', { previewTokens: 1000, preview: 'head' }).when({ threshold: 2500 })],
-  },
-})
+const agent = new Agent({ storage, contextManager: 'auto' })
 ```
 
-The stash keeps each original under `context/<sessionId>/scopes/agent/<agentId>/` and registers a `retrieve_context`
-tool to read it back. Without `stash`, the stash uses the agent's `storage`, so
-`new Agent({ storage, contextManager: 'auto' })` stashes in DynamoDB with the SDK's tuned defaults.
+The stash uses the agent's `storage` and registers a `retrieve_context` tool to read originals back.
 
 ## Direct byte usage
 
