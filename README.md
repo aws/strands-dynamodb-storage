@@ -79,7 +79,7 @@ storage = DynamoDBStorage("agent-storage", region_name="us-east-1")
 agent = Agent(
     storage=storage,
     session_manager=SnapshotSessionManager(),  # persists under session/
-    context_manager="auto",  # stashes oversized tool results under context/
+    context_manager="auto",  # stashes message content under context/
 )
 ```
 
@@ -93,7 +93,7 @@ const storage = new DynamoDBStorage('agent-storage', { region: 'us-east-1' })
 const agent = new Agent({
   storage,
   sessionManager: new SessionManager({}), // persists under session/
-  contextManager: 'auto', // stashes oversized tool results under context/
+  contextManager: 'auto', // stashes message content under context/
 })
 ```
 
@@ -142,8 +142,8 @@ agent = Agent(session_manager=SnapshotSessionManager("s1", storage=storage))
 agent("Remember that my favorite color is blue.")
 ```
 
-The same instance plugs into every SDK subsystem that accepts a `Storage`. Stash oversized tool
-results in DynamoDB through the context manager (experimental, `strands-agents` 1.55.0 or later):
+The same instance plugs into every SDK subsystem that accepts a `Storage`, such as the context
+manager's stash of message content (experimental, `strands-agents` 1.55.0 or later):
 
 ```python
 from strands import Agent
@@ -180,8 +180,8 @@ const agent = new Agent({ sessionManager: new SessionManager({ sessionId: 's1', 
 await agent.invoke('Remember that my favorite color is blue.')
 ```
 
-The same instance plugs into every SDK subsystem that accepts a `Storage`. Stash oversized tool
-results in DynamoDB through the context manager (experimental, `@strands-agents/sdk` 1.18.0 or later):
+The same instance plugs into every SDK subsystem that accepts a `Storage`, such as the context
+manager's stash of message content (experimental, `@strands-agents/sdk` 1.18.0 or later):
 
 ```typescript
 import { Agent } from '@strands-agents/sdk'

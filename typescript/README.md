@@ -47,8 +47,8 @@ const agent = new Agent({ sessionManager: new SessionManager({ storage }) })
 // sessions now persist to DynamoDB — nothing else to wire.
 ```
 
-The same instance backs any subsystem that accepts a `Storage` — for example, stashing oversized
-tool results with the context manager (experimental, `@strands-agents/sdk` 1.18.0 or later):
+The same instance backs any subsystem that accepts a `Storage` — for example, the context manager's
+stash (experimental, `@strands-agents/sdk` 1.18.0 or later):
 
 ```ts
 import { Agent } from '@strands-agents/sdk'
@@ -56,7 +56,9 @@ import { Agent } from '@strands-agents/sdk'
 const agent = new Agent({ storage, contextManager: 'auto' })
 ```
 
-The stash uses the agent's `storage` and registers a `retrieve_context` tool to read originals back.
+The stash writes each message's content under `context/<sessionId>/` in the agent's `storage` and
+registers a `retrieve_context` tool to read originals back. A session manager deletes it with the
+session; without one, each run gets a new session ID, so set `ttlSeconds` to expire old stashes.
 
 ## Direct byte usage
 
@@ -197,7 +199,7 @@ const cohere = new DynamoDBMemoryStore(storage, {
 
 // Any other model: a function from text to an array of numbers (sync or async), an object with an
 // `embed(text, purpose)` method (sync or async) where purpose is 'document' or 'query', or a Strands SDK
-// `Embedder` from '@strands-agents/sdk/storage/search', whose `embed(text)` takes only the text.
+// `Embedder` from '@strands-agents/sdk/storage/search' (1.23.0 or later), whose `embed(text)` takes only the text.
 // Convert a Float32Array with Array.from.
 const custom = new DynamoDBMemoryStore(storage, { embedder: async (text) => Array.from(await myModel.embed(text)) })
 ```

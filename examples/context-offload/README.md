@@ -65,8 +65,8 @@ after delete: S3 objects remaining: 0
 
 ## Where this matters in an agent
 
-The Strands SDK's context manager stashes oversized tool results through the
-same `Storage` contract, and by default its stash uses the agent's `storage`.
+The Strands SDK's context manager stashes message content, tool results included, through
+the same `Storage` contract, and by default its stash uses the agent's `storage`.
 An agent constructed with this store gets the S3 spillover for free: big tool
 outputs leave the model context and land wherever the payload size says they
 should, with nothing in the agent code aware of the split.

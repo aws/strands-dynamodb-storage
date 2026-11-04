@@ -22,8 +22,8 @@ storage = DynamoDBStorage("agent-data", region_name="us-east-1")
 agent = Agent(session_manager=SnapshotSessionManager(storage=storage))
 ```
 
-The same instance backs any subsystem that accepts a `Storage`, for example stashing oversized
-tool results with the context manager (experimental, `strands-agents` 1.55.0 or later):
+The same instance backs any subsystem that accepts a `Storage`, for example the context manager's
+stash (experimental, `strands-agents` 1.55.0 or later):
 
 ```python
 from strands import Agent
@@ -31,7 +31,9 @@ from strands import Agent
 agent = Agent(storage=storage, context_manager="auto")
 ```
 
-The stash uses the agent's `storage` and registers a `retrieve_context` tool to read originals back.
+The stash writes each message's content under `context/<session_id>/` in the agent's `storage` and
+registers a `retrieve_context` tool to read originals back. A session manager deletes it with the
+session; without one, each run gets a new session ID, so set `ttl_seconds` to expire old stashes.
 
 Direct byte usage (async):
 
@@ -131,7 +133,7 @@ memory = DynamoDBMemoryStore(storage, embedder=BedrockEmbedder("us.cohere.embed-
 
 # Any other model: a function from text to a list of floats (sync or async), an object with an
 # `embed(self, text, purpose)` method (sync or async) where purpose is "document" or "query", or
-# a Strands SDK `strands.storage.search.Embedder`, whose `embed(text)` takes only the text.
+# an object whose `embed(text)` takes only the text.
 memory = DynamoDBMemoryStore(storage, embedder=lambda text: my_model.encode(text).tolist())
 ```
 
