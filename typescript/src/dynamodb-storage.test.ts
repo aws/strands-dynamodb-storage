@@ -1006,6 +1006,50 @@ describe('DynamoDBStorage — search strategy', () => {
     await expect(search).rejects.toHaveProperty('cause', strategy.searchError)
   })
 
+  it('passes a StorageError from the strategy through unwrapped', async () => {
+    const strategy = new RecordingStrategy()
+    strategy.searchError = new StorageError('index unavailable')
+    const { storage } = strategyStorage(strategy)
+    await expect(storage.search('hello')).rejects.toBe(strategy.searchError)
+  })
+
+  it('removes the index entry through the strategy on delete', async () => {
+    const removed: Array<{ storage: DynamoDBStorage; key: string }> = []
+    const strategy = new RecordingStrategy()
+    const removing = Object.assign(strategy, {
+      remove: async (storage: DynamoDBStorage, key: string) => {
+        removed.push({ storage, key })
+      },
+    })
+    const { storage } = strategyStorage(removing)
+    const view = storage.namespace('user/u1')
+    await view.write('notes/a', bytes('hi'))
+    await view.delete('/notes//a')
+    expect(removed).toEqual([{ storage: view, key: 'notes/a' }])
+    expect(await view.read('notes/a')).toBeNull()
+  })
+
+  it('reports a failed removal after deleting the value', async () => {
+    const cause = new Error('index down')
+    const strategy = Object.assign(new RecordingStrategy(), {
+      remove: async () => {
+        throw cause
+      },
+    })
+    const { storage } = strategyStorage(strategy)
+    await storage.write('sessions/s1/a', bytes('hello'))
+    const del = storage.delete('sessions/s1/a')
+    await expect(del).rejects.toThrow(/but removing its index entry failed/)
+    await expect(del).rejects.toHaveProperty('cause', cause)
+    expect(await storage.read('sessions/s1/a')).toBeNull()
+  })
+
+  it('exposes the normalized prefix for strategies that key their own index', () => {
+    const { storage } = strategyStorage(new RecordingStrategy())
+    expect(storage.prefix).toBe('')
+    expect(storage.namespace('/user//u1/').namespace('notes').prefix).toBe('user/u1/notes/')
+  })
+
   it('answers a SearchQuery from the vector index, not the strategy', async () => {
     const strategy = new RecordingStrategy()
     const { storage } = strategyStorage(strategy)

@@ -79,8 +79,7 @@ class DynamoDBMemoryStore(MemoryStore):
             storage: The ``DynamoDBStorage`` (usually a namespaced view) to keep memories in.
                 Its table needs the vector index described in the package README.
             embedder: An :class:`Embedder` such as :class:`BedrockEmbedder`, an object whose
-                ``embed`` takes only the text (such as a Strands SDK
-                ``strands.storage.search.Embedder``), or a plain function from text to
+                ``embed`` takes only the text, or a plain function from text to
                 vector. Defaults to ``BedrockEmbedder()`` (Amazon Titan Text Embeddings V2,
                 1024 dimensions) in the storage's Region, with its ``boto_session`` and
                 ``boto_client_config``.
@@ -362,15 +361,21 @@ async def _call(function: Any, *args: Any) -> Any:
 def _takes_purpose(embed: Any) -> bool:
     """Whether an ``embed`` method takes the purpose as a second positional argument.
 
-    The SDK's ``Embedder.embed`` takes only the text. A signature that cannot be read is
-    assumed to take the purpose, as the :class:`Embedder` protocol does.
+    A required second parameter, or an optional one named ``purpose``, is the purpose; an
+    ``embed(text)`` with only optional extras takes the text alone. A signature that cannot be
+    read is assumed to take the purpose, as the :class:`Embedder` protocol does.
     """
     try:
         parameters = inspect.signature(embed).parameters.values()
     except (TypeError, ValueError):
         return True
+    if any(p.kind is p.VAR_POSITIONAL for p in parameters):
+        return True
     positional = [p for p in parameters if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)]
-    return len(positional) >= 2 or any(p.kind is p.VAR_POSITIONAL for p in parameters)
+    if len(positional) < 2:
+        return False
+    second = positional[1]
+    return second.default is second.empty or second.name == "purpose"
 
 
 def _check_limit(value: Any, label: str) -> None:

@@ -40,7 +40,7 @@ class Embedder(Protocol):
 
 
 class _TextEmbedder(Protocol):
-    """An embedder whose ``embed`` takes only the text, such as ``strands.storage.search.Embedder``."""
+    """An embedder whose ``embed`` takes only the text."""
 
     def embed(self, text: str) -> Union[_Vector, Awaitable[_Vector]]:
         """Return the embedding vector of ``text``."""

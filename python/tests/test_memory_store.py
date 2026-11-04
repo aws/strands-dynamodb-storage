@@ -797,6 +797,19 @@ async def test_passes_the_purpose_to_an_embed_method_with_an_optional_purpose_or
     assert calls == ["query", "query"]
 
 
+async def test_an_optional_extra_parameter_is_not_taken_for_the_purpose(ddb):
+    calls = []
+
+    class WithDimensions:
+        async def embed(self, text, dimensions=None):
+            calls.append((text, dimensions))
+            return [1.0, 0.0]
+
+    store = make_store(ddb, embedder=WithDimensions())
+    await store.add("Prefers a window seat")
+    assert calls == [("Prefers a window seat", None)]
+
+
 async def test_accepts_a_strands_sdk_embedder(ddb):
     search = pytest.importorskip("strands.storage.search")
     if not hasattr(search, "Embedder"):

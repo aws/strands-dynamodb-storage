@@ -975,6 +975,58 @@ async def test_search_strategy_failure_is_wrapped(aws):
     assert isinstance(e.value.__cause__, RuntimeError)
 
 
+async def test_a_search_strategy_storage_error_is_not_wrapped(aws):
+    class Failing(RecordingStrategy):
+        async def search(self, storage, query, **kwargs):
+            raise StorageError("index unavailable")
+
+    with pytest.raises(StorageError, match="^index unavailable$"):
+        await make(aws, search_strategy=Failing()).search("window")
+
+
+async def test_delete_removes_the_index_entry_through_the_search_strategy(aws):
+    class Removing(RecordingStrategy):
+        def __init__(self):
+            super().__init__()
+            self.removed: list[tuple[DynamoDBStorage, str]] = []
+
+        async def remove(self, storage, key):
+            self.removed.append((storage, key))
+
+    strategy = Removing()
+    view = make(aws, search_strategy=strategy).namespace("user/u1")
+    await view.write("notes/a", b"v")
+    await view.delete("/notes//a")
+    assert strategy.removed == [(view, "notes/a")]
+    assert await view.read("notes/a") is None
+
+
+async def test_a_removal_failure_raises_after_the_delete(aws):
+    class Failing(RecordingStrategy):
+        async def remove(self, storage, key):
+            raise RuntimeError("index down")
+
+    s = make(aws, search_strategy=Failing())
+    await s.write("sessions/s1/a", b"v")
+    with pytest.raises(StorageError, match="but removing its index entry failed") as e:
+        await s.delete("sessions/s1/a")
+    assert isinstance(e.value.__cause__, RuntimeError)
+    assert await s.read("sessions/s1/a") is None
+
+
+async def test_a_strategy_without_remove_does_not_fail_a_delete(aws):
+    s = make(aws, search_strategy=RecordingStrategy())
+    await s.write("sessions/s1/a", b"v")
+    await s.delete("sessions/s1/a")
+    assert await s.read("sessions/s1/a") is None
+
+
+def test_prefix_is_the_normalized_namespace(aws):
+    s = make(aws)
+    assert s.prefix == ""
+    assert s.namespace("/user//u1/").namespace("notes").prefix == "user/u1/notes/"
+
+
 async def test_vector_search_query_bypasses_the_search_strategy(aws):
     strategy = RecordingStrategy()
     s = make(aws, vector_search=cosine_adapter(aws[0]), search_strategy=strategy)

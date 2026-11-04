@@ -84,11 +84,14 @@ export type VectorSearchAdapter = (params: {
 /**
  * Search strategy for a plain-string {@link DynamoDBStorage.search}, such as the SDK's
  * `KeywordSearchStrategy` or any `SearchStrategy<DynamoDBStorage>`. `index`, when present,
- * runs after each write.
+ * runs after each write, and `remove` after each delete. A strategy that keeps its own index
+ * keys it by `storage.prefix + key`, so the `namespace()` views that share it stay apart.
  */
 export interface DynamoDBSearchStrategy {
   /** Indexes a written value; `key` is relative to `storage`. */
   index?(storage: DynamoDBStorage, key: string, data: Uint8Array): Promise<void>
+  /** Removes a deleted value's index entry; `key` is relative to `storage`. */
+  remove?(storage: DynamoDBStorage, key: string): Promise<void>
   /** Returns matching keys, ranked best-first. */
   search(storage: DynamoDBStorage, query: string): Promise<SearchResult[]>
 }
@@ -253,6 +256,11 @@ export class DynamoDBStorage implements Storage<string | DynamoDBListQuery> {
     this._searchStrategy = config?.searchStrategy
   }
 
+  /** The normalized key prefix (ending in `/`), or `''` when none was configured. */
+  get prefix(): string {
+    return this._prefix
+  }
+
   /**
    * Stores `data` under `key`, overwriting any existing value. Values above the
    * item-size limit are offloaded to S3 when an `s3Bucket` is configured. An optional
@@ -382,9 +390,11 @@ export class DynamoDBStorage implements Storage<string | DynamoDBListQuery> {
 
   /**
    * Deletes the value stored under `key`, including any offloaded S3 object.
-   * A no-op if the key does not exist.
+   * A no-op if the key does not exist. With a `searchStrategy` that has `remove`, its
+   * index entry is removed too.
    *
-   * @throws {@link StorageError} if the key is invalid or the delete fails
+   * @throws {@link StorageError} if the key is invalid, the delete fails, or the search
+   *   strategy fails to remove the index entry (the value is deleted in that case)
    */
   async delete(key: string): Promise<void> {
     const normalized = normalizeKey(key)
@@ -403,6 +413,15 @@ export class DynamoDBStorage implements Storage<string | DynamoDBListQuery> {
       throw new StorageError(`Failed to delete '${normalized}' from DynamoDB table '${this._tableName}'`, {
         cause: error,
       })
+    }
+    if (!this._searchStrategy?.remove) return
+    try {
+      await this._searchStrategy.remove(this, normalized)
+    } catch (error: unknown) {
+      throw new StorageError(
+        `Deleted '${normalized}' from DynamoDB table '${this._tableName}' but removing its index entry failed`,
+        { cause: error }
+      )
     }
   }
 
@@ -516,6 +535,7 @@ export class DynamoDBStorage implements Storage<string | DynamoDBListQuery> {
       try {
         return await this._searchStrategy.search(this, query)
       } catch (error: unknown) {
+        if (error instanceof StorageError) throw error
         throw new StorageError(`Failed to search DynamoDB table '${this._tableName}'`, { cause: error })
       }
     }

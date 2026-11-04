@@ -246,6 +246,15 @@ class DynamoDBStorage:
         self._boto_client_config = boto_client_config
         self._search_strategy = search_strategy
 
+    @property
+    def prefix(self) -> str:
+        """The normalized key prefix (ending in ``/``), or ``""`` when none was configured.
+
+        A search strategy that keeps its own index keys it by ``storage.prefix + key``, so the
+        :meth:`namespace` views that share it stay apart.
+        """
+        return self._prefix
+
     async def write(
         self,
         key: str,
@@ -376,8 +385,11 @@ class DynamoDBStorage:
     async def delete(self, key: str) -> None:
         """Delete the value under ``key`` (and any offloaded S3 object). No-op if absent.
 
+        With a ``search_strategy`` that has a ``remove`` method, its index entry is removed too.
+
         Raises:
-            StorageError: If the key is invalid or the delete fails.
+            StorageError: If the key is invalid, the delete fails, or the search strategy fails
+                to remove the index entry (the value is deleted in that case).
         """
         normalized = normalize_key(key)
         full = f"{self._prefix}{normalized}"
@@ -396,6 +408,16 @@ class DynamoDBStorage:
             raise
         except Exception as error:
             raise StorageError(f"Failed to delete '{normalized}' from DynamoDB table '{self._table_name}'") from error
+
+        remove = getattr(self._search_strategy, "remove", None)
+        if remove is not None:
+            try:
+                await remove(self, normalized)
+            except Exception as error:
+                raise StorageError(
+                    f"Deleted '{normalized}' from DynamoDB table '{self._table_name}' "
+                    "but removing its index entry failed"
+                ) from error
 
     async def list(self, query: Union[str, DynamoDBListQuery]) -> builtins.list[str]:
         """List keys, sorted ascending.
@@ -521,6 +543,8 @@ class DynamoDBStorage:
         if self._search_strategy is not None:
             try:
                 return await self._search_strategy.search(self, query)
+            except StorageError:
+                raise
             except Exception as error:
                 raise StorageError(f"Failed to search DynamoDB table '{self._table_name}'") from error
         try:
