@@ -83,11 +83,6 @@ import { Agent } from '@strands-agents/sdk'
 const agent = new Agent({ storage, contextManager: 'auto' })
 ```
 
-The context manager is experimental and needs
-`strands-agents` 1.55.0 or `@strands-agents/sdk` 1.18.0 or later. The stash
-writes under `context/<session_id>/scopes/agent/<agent_id>/`, inside the
-store's `prefix`.
-
 ## Considerations
 
 - If you enable TTL on offloaded values, add an S3 lifecycle rule as the

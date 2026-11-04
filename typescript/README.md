@@ -48,7 +48,7 @@ const agent = new Agent({ sessionManager: new SessionManager({ storage }) })
 ```
 
 The same instance backs any subsystem that accepts a `Storage` — for example, the context manager's
-stash (experimental, `@strands-agents/sdk` 1.18.0 or later):
+stash (`@strands-agents/sdk` 1.18.0 or later):
 
 ```ts
 import { Agent } from '@strands-agents/sdk'
