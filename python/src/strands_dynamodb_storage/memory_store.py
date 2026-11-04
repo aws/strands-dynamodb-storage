@@ -79,7 +79,8 @@ class DynamoDBMemoryStore(MemoryStore):
             storage: The ``DynamoDBStorage`` (usually a namespaced view) to keep memories in.
                 Its table needs the vector index described in the package README.
             embedder: An :class:`Embedder` such as :class:`BedrockEmbedder`, an object whose
-                ``embed`` takes only the text, or a plain function from text to
+                ``embed`` takes only the text (such as a Strands SDK
+                ``strands.storage.search.Embedder``), or a plain function from text to
                 vector. Defaults to ``BedrockEmbedder()`` (Amazon Titan Text Embeddings V2,
                 1024 dimensions) in the storage's Region, with its ``boto_session`` and
                 ``boto_client_config``.

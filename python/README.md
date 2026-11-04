@@ -133,7 +133,7 @@ memory = DynamoDBMemoryStore(storage, embedder=BedrockEmbedder("us.cohere.embed-
 
 # Any other model: a function from text to a list of floats (sync or async), an object with an
 # `embed(self, text, purpose)` method (sync or async) where purpose is "document" or "query", or
-# an object whose `embed(text)` takes only the text.
+# a Strands SDK `strands.storage.search.Embedder`, whose `embed(text)` takes only the text.
 memory = DynamoDBMemoryStore(storage, embedder=lambda text: my_model.encode(text).tolist())
 ```
 
