@@ -14,7 +14,8 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { CreateTableCommand, DeleteTableCommand, DescribeTableCommand, DynamoDBClient } from '@aws-sdk/client-dynamodb'
-import { DynamoDBStorage, type SearchResult } from '../../src/index.js'
+import { FileMemoryStore } from '@strands-agents/sdk/vended-memory-stores/file-memory-store'
+import { DynamoDBStorage, DynamoDBVectorSearchStrategy, type SearchResult } from '../../src/index.js'
 
 const RUN = process.env.RUN_INTEG === '1'
 const REGION = process.env.AWS_REGION ?? 'us-east-1'
@@ -91,5 +92,36 @@ describe.skipIf(!RUN)('DynamoDBStorage — native vector search (live)', () => {
 
     const [top] = await storage.search({ vector: [1, 0, 0, 0], topK: 1, pk: 'tenant/a', includeValues: true })
     expect(new TextDecoder().decode(top?.data)).toBe('likes window seats')
+  }, 360_000)
+
+  it('recalls by meaning through DynamoDBVectorSearchStrategy, best first', async () => {
+    const vocabulary = ['dark', 'mode', 'coffee', 'tea']
+    const embed = (text: string) => {
+      const tokens = text.toLowerCase().replace(/#/g, ' ').split(/\s+/)
+      return vocabulary.map((word) => 0.01 + tokens.filter((token) => token === word).length)
+    }
+    const storage = new DynamoDBStorage(TABLE, {
+      region: REGION,
+      prefix: 'tenant/b/',
+      indexName: INDEX,
+      searchStrategy: new DynamoDBVectorSearchStrategy({ embedder: embed }),
+    })
+    const knowledge = new FileMemoryStore({ name: 'facts', storage, writable: true })
+    await knowledge.add('# Display\nprefers dark mode')
+    await knowledge.add('# Drinks\nlikes coffee and tea')
+
+    // Eventually consistent: poll until both items are visible to search.
+    const deadline = Date.now() + 300_000
+    let found = await knowledge.search('dark')
+    while (found.length < 2) {
+      if (Date.now() > deadline) throw new Error('expected both memories in search results within 300s')
+      await sleep(5000)
+      found = await knowledge.search('dark')
+    }
+    expect(found.map((entry) => entry.content.split('\n')[0])).toEqual(['# Display', '# Drinks'])
+
+    const raw = await storage.namespace('memory/facts').search('dark')
+    expect(raw[0]!.score).toBeGreaterThan(raw[1]!.score) // converted COSINE scores rank the closest first
+    expect(raw.every((r) => r.score > 0 && r.score <= 1)).toBe(true)
   }, 360_000)
 })

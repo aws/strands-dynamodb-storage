@@ -61,6 +61,8 @@ await store.delete("sessions/s1/snapshot.json")
   requires boto3 >= 1.43.64); a `vector_search` adapter can override the call.
 - `DynamoDBMemoryStore`, a Strands `MemoryStore` for the Memory Manager, with
   `BedrockEmbedder` (Amazon Titan Text Embeddings V2, Cohere Embed v3 and v4).
+- `DynamoDBVectorSearchStrategy`, a Strands `SearchStrategy` over the same vector index, for text
+  search through `DynamoDBStorage` (such as the SDK's `FileMemoryStore`).
 
 ## Long-term memory
 
@@ -199,13 +201,37 @@ constructor, which also indexes every write and is shared with `namespace()` vie
 it uses the SDK's `KeywordSearchStrategy` (`strands-agents` 1.54.0 or later), which lists every key
 and so works on a namespace at least two segments deep, such as `store.namespace("user/u1")`; on a
 broader storage the listing is rejected as too broad. Keyword scores rank higher as more relevant,
-unlike vector scores. For search by meaning, use `DynamoDBMemoryStore` or pass a `SearchQuery`.
+unlike vector scores.
 
 ```python
 from strands.storage.search import KeywordSearchStrategy
 
 store = DynamoDBStorage("agent-data", search_strategy=KeywordSearchStrategy())
 ```
+
+### Vector search strategy
+
+`DynamoDBVectorSearchStrategy` is the DynamoDB counterpart of the SDK's `S3VectorSearchStrategy`:
+search by meaning over the table's vector index, for anything that searches through a `Storage`.
+Each `write` embeds the value and stores its vector on the same item, in the same request; a
+plain-string `search` embeds the query and returns results best first, with higher scores closer.
+Its embedder is any SDK `Embedder` (`strands-agents` 1.64.0 or later), `BedrockEmbedder` (the
+default, which is itself an SDK `Embedder`), or a function from text to vector.
+
+```python
+from strands.vended_memory_stores.file_memory_store import FileMemoryStore
+from strands_dynamodb_storage import DynamoDBStorage, DynamoDBVectorSearchStrategy
+
+storage = DynamoDBStorage("agent-memory", search_strategy=DynamoDBVectorSearchStrategy())
+knowledge = FileMemoryStore(name="facts", storage=storage)
+```
+
+Every write through the storage is embedded, so give the strategy a storage of its own rather than
+the agent's. Searches are pinned to one partition, so use it on a storage namespaced at least two
+segments deep, as `FileMemoryStore`'s `memory/<name>` is. Each value is embedded whole and must fit
+the embedding model's input; if embedding fails, `write` raises and stores nothing. Values written
+before the strategy was configured have no vector until rewritten, or passed to `index()`. Pass
+`distance_function` when the index doesn't use `COSINE`.
 
 Like a global secondary index, the vector index is eventually
 consistent, and a freshly created index backfills before it is searchable. Requires `boto3 >= 1.43.64`; a

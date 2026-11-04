@@ -5,10 +5,8 @@
 
 from __future__ import annotations
 
-import asyncio
 import builtins
 import hashlib
-import inspect
 import logging
 import math
 from typing import TYPE_CHECKING, Any, Optional, Union
@@ -17,7 +15,16 @@ from strands.memory import MemoryEntry, MemoryStore, SearchOptions
 from strands.types.exceptions import StorageError
 
 from .dynamodb_storage import _MAX_TOP_K, DynamoDBStorage, SearchQuery
-from .embedders import BedrockEmbedder, Embedder, EmbeddingPurpose, EmbedFunction, _is_finite_number, _TextEmbedder
+from .embedders import (
+    BedrockEmbedder,
+    Embedder,
+    EmbeddingPurpose,
+    EmbedFunction,
+    _as_vector,
+    _call_embedder,
+    _takes_purpose,
+    _TextEmbedder,
+)
 
 if TYPE_CHECKING:
     from strands.memory import ExtractionConfig
@@ -231,28 +238,20 @@ class DynamoDBMemoryStore(MemoryStore):
         return min(requested, _MAX_TOP_K)
 
     async def _embed(self, text: str, purpose: EmbeddingPurpose) -> builtins.list[float]:
-        embedder = self._embedder
         try:
-            # getattr, not isinstance(embedder, Embedder): from Python 3.12 the Protocol check
-            # skips attributes resolved by __getattr__ (as on unittest.mock objects).
-            embed = getattr(embedder, "embed", None)
-            if not callable(embed):
-                result: Any = await _call(embedder, text)
-            elif self._embed_takes_purpose:
-                result = await _call(embed, text, purpose)
-            else:
-                result = await _call(embed, text)
+            result = await _call_embedder(self._embedder, text, purpose, takes_purpose=self._embed_takes_purpose)
         except StorageError:
             raise
         except Exception as error:
             raise StorageError(
                 f"Embedding failed in memory store '{self.name}': {type(error).__name__}: {error}"
             ) from error
-        if not isinstance(result, (list, tuple)) or len(result) == 0 or not all(_is_finite_number(v) for v in result):
+        vector = _as_vector(result)
+        if vector is None:
             raise StorageError(
                 f"The embedder for memory store '{self.name}' must return a non-empty list of finite numbers"
             )
-        return [float(v) for v in result]
+        return vector
 
     def _storable_metadata(self, metadata: Any) -> Optional[dict[str, Union[str, int, float, bool]]]:
         """Keep the metadata entries the storage can store; drop the rest with a warning."""
@@ -347,32 +346,6 @@ def _is_dynamodb_number(value: Union[int, float]) -> bool:
     if isinstance(value, float) and not math.isfinite(value):
         return False
     return value == 0 or 1e-130 <= abs(value) <= _MAX_SAFE_INTEGER
-
-
-async def _call(function: Any, *args: Any) -> Any:
-    """Await ``function(*args)``; a sync callable (for example a boto3 call) runs in a worker thread."""
-    if inspect.iscoroutinefunction(function):
-        return await function(*args)
-    result = await asyncio.to_thread(function, *args)
-    if inspect.isawaitable(result):
-        result = await result
-    return result
-
-
-def _takes_purpose(embed: Any) -> bool:
-    """Whether an ``embed`` method takes the purpose as a second positional argument.
-
-    Any ``embed`` that accepts a second positional argument gets the purpose, whatever the
-    parameter is called; only one that takes the text alone, such as the SDK's
-    ``Embedder.embed``, is called without it. A signature that cannot be read is assumed to
-    take the purpose, as the :class:`Embedder` protocol does.
-    """
-    try:
-        parameters = inspect.signature(embed).parameters.values()
-    except (TypeError, ValueError):
-        return True
-    positional = [p for p in parameters if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)]
-    return len(positional) >= 2 or any(p.kind is p.VAR_POSITIONAL for p in parameters)
 
 
 def _check_limit(value: Any, label: str) -> None:

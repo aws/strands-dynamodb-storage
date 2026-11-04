@@ -9,7 +9,8 @@ manager's stash, transcripts) — with optional S3 offload, gzip compression, TT
 
 :class:`DynamoDBMemoryStore` implements the SDK's ``MemoryStore`` for the Memory Manager
 on top of that vector search, embedding text with :class:`BedrockEmbedder` or a function
-you supply.
+you supply. :class:`DynamoDBVectorSearchStrategy` implements the SDK's ``SearchStrategy``
+over the same index, for text search through the storage.
 """
 
 from .dynamodb_storage import (
@@ -28,6 +29,7 @@ from .embedders import (
     EmbedFunction,
 )
 from .memory_store import DynamoDBMemoryStore
+from .vector_search import DistanceFunction, DynamoDBVectorSearchStrategy
 
 __all__ = [
     "DynamoDBStorage",
@@ -35,6 +37,8 @@ __all__ = [
     "SearchQuery",
     "SearchResult",
     "VectorSearchAdapter",
+    "DynamoDBVectorSearchStrategy",
+    "DistanceFunction",
     "DynamoDBMemoryStore",
     "BedrockEmbedder",
     "BedrockModelFamily",

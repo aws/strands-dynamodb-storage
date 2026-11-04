@@ -265,11 +265,14 @@ export class DynamoDBStorage implements Storage<string | DynamoDBListQuery> {
    * Stores `data` under `key`, overwriting any existing value. Values above the
    * item-size limit are offloaded to S3 when an `s3Bucket` is configured. An optional
    * `vector` (kept inline for the native index) and `metadata` enable `search`. With a
-   * `searchStrategy`, the value is then indexed through it.
+   * `DynamoDBVectorSearchStrategy` and no `vector`, the value is embedded first and its
+   * vector stored in the same request. With another `searchStrategy`, the value is then
+   * indexed through it.
    *
    * @throws {@link StorageError} if the key is invalid, the value is oversized with
-   *   no S3 bucket configured, the write fails, or the search strategy fails to index the
-   *   value (the value is stored in that case)
+   *   no S3 bucket configured, the write fails, embedding for a
+   *   `DynamoDBVectorSearchStrategy` fails (nothing is stored then), or another search
+   *   strategy fails to index the value (the value is stored then)
    */
   async write(
     key: string,
@@ -280,15 +283,24 @@ export class DynamoDBStorage implements Storage<string | DynamoDBListQuery> {
     const full = `${this._prefix}${normalized}`
     const { pk, sk } = this._split(full)
     const extra: Record<string, unknown> = {}
+    const embedding = await this._embeddingStrategy()
+    let vector = options?.vector
+    if (vector === undefined && embedding) {
+      try {
+        vector = await embedding._documentVector(this, data)
+      } catch (error: unknown) {
+        throw new StorageError(`Failed to embed '${normalized}' for search, so nothing was written`, { cause: error })
+      }
+    }
     // The embedding stays inline in DynamoDB even when the payload is offloaded,
     // because the native vector index can only index an on-item attribute.
-    if (options?.vector) {
+    if (vector) {
       // Mirror of the query-side check in search(): the service rejects
       // non-finite values anyway, but as an opaque write failure.
-      if (!options.vector.every((v) => Number.isFinite(v))) {
+      if (!vector.every((v) => Number.isFinite(v))) {
         throw new StorageError('Vector contains non-finite values (nan/inf); the DynamoDB N type rejects them.')
       }
-      extra[this._vectorAttribute] = options.vector
+      extra[this._vectorAttribute] = vector
     }
     if (options?.metadata) extra[META_ATTR] = options.metadata
     const ttlSeconds = options?.ttlSeconds ?? this._ttlSeconds
@@ -339,7 +351,7 @@ export class DynamoDBStorage implements Storage<string | DynamoDBListQuery> {
       if (error instanceof StorageError) throw error
       throw new StorageError(`Failed to write '${normalized}' to DynamoDB table '${this._tableName}'`, { cause: error })
     }
-    if (this._searchStrategy?.index) {
+    if (!embedding && this._searchStrategy?.index) {
       try {
         await this._searchStrategy.index(this, normalized, data)
       } catch (error: unknown) {
@@ -348,6 +360,14 @@ export class DynamoDBStorage implements Storage<string | DynamoDBListQuery> {
         })
       }
     }
+  }
+
+  /** The search strategy if it is a `DynamoDBVectorSearchStrategy`, which `write` embeds for. */
+  private async _embeddingStrategy(): Promise<import('./vector-search.js').DynamoDBVectorSearchStrategy | undefined> {
+    if (!this._searchStrategy) return undefined
+    // Loaded here because the strategy's module imports this one.
+    const { DynamoDBVectorSearchStrategy } = await import('./vector-search.js')
+    return this._searchStrategy instanceof DynamoDBVectorSearchStrategy ? this._searchStrategy : undefined
   }
 
   /**

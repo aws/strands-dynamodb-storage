@@ -222,7 +222,7 @@ plain-string query goes to the `searchStrategy` in the config, which also indexe
 `namespace()` views. Without one, it uses the SDK's `KeywordSearchStrategy` (`@strands-agents/sdk` 1.14.0 or later),
 which lists every key and so works on a namespace at least two segments deep, such as `storage.namespace('user/u1')`; on
 a broader storage the listing is rejected as too broad. Keyword scores rank higher as more relevant, unlike vector
-scores. For search by meaning, use `DynamoDBMemoryStore`.
+scores. For search by meaning, use `DynamoDBMemoryStore` or the [vector search strategy](#vector-search-strategy).
 On DynamoDB the search runs against the **native vector
 index**, so nearest-neighbour scoring happens _in the database_ -- no second vector store, no ETL -- and because the index
 is partitioned on `pk`, every search is scoped to the caller's key space. Creating the table with a vector index (and the
@@ -258,6 +258,28 @@ const results = await store.search({
 // (COSINE/EUCLIDEAN: lower = nearer; DOT_PRODUCT: higher = more similar).
 ```
 
+### Vector search strategy
+
+`DynamoDBVectorSearchStrategy` is the DynamoDB counterpart of the SDK's `S3VectorSearchStrategy`: search by meaning
+over the table's vector index, for anything that searches through a `Storage`. Each `write` embeds the value and stores
+its vector on the same item, in the same request; a plain-string `search` embeds the query and returns results best
+first, with higher scores closer. Its embedder is any SDK `Embedder` (`@strands-agents/sdk` 1.23.0 or later),
+`BedrockEmbedder` (the default, which also fits the SDK's `Embedder`), or a function from text to vector.
+
+```ts
+import { FileMemoryStore } from '@strands-agents/sdk/vended-memory-stores/file-memory-store'
+import { DynamoDBStorage, DynamoDBVectorSearchStrategy } from 'strands-dynamodb-storage'
+
+const storage = new DynamoDBStorage('agent-memory', { searchStrategy: new DynamoDBVectorSearchStrategy() })
+const knowledge = new FileMemoryStore({ name: 'facts', storage })
+```
+
+Every write through the storage is embedded, so give the strategy a storage of its own rather than the agent's.
+Searches are pinned to one partition, so use it on a storage namespaced at least two segments deep, as
+`FileMemoryStore`'s `memory/<name>` is. Each value is embedded whole and must fit the embedding model's input; if
+embedding fails, `write` throws and stores nothing. Values written before the strategy was configured have no vector
+until rewritten, or passed to `index()`. Pass `distanceFunction` when the index doesn't use `COSINE`.
+
 ### The `vectorSearch` adapter (optional override)
 
 `search()` issues DynamoDB `SearchVectors` natively (requires `@aws-sdk/client-dynamodb` >= 3.1103.0).
@@ -280,15 +302,16 @@ The adapter is purely an override: with none configured, `search()` issues the n
 
 ## Configuration reference
 
-| Option                               | Purpose                                                                  |
-| ------------------------------------ | ------------------------------------------------------------------------ |
-| `region` / `client`                  | AWS region, or a pre-built `DynamoDBDocumentClient` (mutually exclusive) |
-| `prefix`                             | Key prefix prepended to every key (a namespace within the table)         |
-| `s3Bucket` / `s3Prefix` / `s3Client` | S3 offload target for large values                                       |
-| `compression`                        | `'gzip'` \| `'none'` (default `'none'`)                                  |
-| `ttlSeconds` / `ttlAttribute`        | TTL duration + attribute name (default `expireAt`)                       |
-| `indexName` / `vectorAttribute`      | Vector index + embedding attribute (default `vector_index` / `vector`)   |
-| `vectorSearch`                       | Adapter that performs the native vector search                           |
+| Option                               | Purpose                                                                      |
+| ------------------------------------ | ---------------------------------------------------------------------------- |
+| `region` / `client`                  | AWS region, or a pre-built `DynamoDBDocumentClient` (mutually exclusive)     |
+| `prefix`                             | Key prefix prepended to every key (a namespace within the table)             |
+| `s3Bucket` / `s3Prefix` / `s3Client` | S3 offload target for large values                                           |
+| `compression`                        | `'gzip'` \| `'none'` (default `'none'`)                                      |
+| `ttlSeconds` / `ttlAttribute`        | TTL duration + attribute name (default `expireAt`)                           |
+| `indexName` / `vectorAttribute`      | Vector index + embedding attribute (default `vector_index` / `vector`)       |
+| `vectorSearch`                       | Adapter that performs the native vector search                               |
+| `searchStrategy`                     | Strategy for plain-string `search()`, such as `DynamoDBVectorSearchStrategy` |
 
 ## Minimal IAM
 

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import builtins
+import inspect
 import json
 import math
 from collections.abc import Awaitable, Callable
@@ -52,6 +53,9 @@ EmbedFunction = Callable[[str], Union[_Vector, Awaitable[_Vector]]]
 
 It returns a list or tuple of floats; convert a NumPy array with ``.tolist()``.
 """
+
+_AnyEmbedder = Union[Embedder, _TextEmbedder, EmbedFunction]
+"""Every embedder shape this package accepts."""
 
 DEFAULT_EMBEDDING_MODEL_ID = "amazon.titan-embed-text-v2:0"
 """Default :class:`BedrockEmbedder` model: Amazon Titan Text Embeddings V2."""
@@ -267,3 +271,65 @@ class BedrockEmbedder:
                 config=_client_config(self._boto_client_config),
             )
         return self._client
+
+
+async def _call(function: Any, *args: Any) -> Any:
+    """Await ``function(*args)``; a sync callable (for example a boto3 call) runs in a worker thread."""
+    if inspect.iscoroutinefunction(function):
+        return await function(*args)
+    result = await asyncio.to_thread(function, *args)
+    if inspect.isawaitable(result):
+        result = await result
+    return result
+
+
+def _takes_purpose(embed: Any) -> bool:
+    """Whether an ``embed`` method takes the purpose as a second positional argument.
+
+    Any ``embed`` that accepts a second positional argument gets the purpose, whatever the
+    parameter is called; only one that takes the text alone, such as the SDK's
+    ``Embedder.embed``, is called without it. A signature that cannot be read is assumed to
+    take the purpose, as the :class:`Embedder` protocol does.
+    """
+    try:
+        parameters = inspect.signature(embed).parameters.values()
+    except (TypeError, ValueError):
+        return True
+    positional = [p for p in parameters if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)]
+    return len(positional) >= 2 or any(p.kind is p.VAR_POSITIONAL for p in parameters)
+
+
+async def _call_embedder(embedder: Any, text: str, purpose: EmbeddingPurpose, *, takes_purpose: bool) -> Any:
+    """Call ``embedder`` as its shape takes text: ``embed(text, purpose)``, ``embed(text)``, or ``embedder(text)``."""
+    # getattr, not isinstance(embedder, Embedder): from Python 3.12 the Protocol check
+    # skips attributes resolved by __getattr__ (as on unittest.mock objects).
+    embed = getattr(embedder, "embed", None)
+    if not callable(embed):
+        return await _call(embedder, text)
+    if takes_purpose:
+        return await _call(embed, text, purpose)
+    return await _call(embed, text)
+
+
+def _as_vector(result: Any) -> Optional[builtins.list[float]]:
+    """``result`` as a list of floats, or ``None`` unless it is a non-empty list or tuple of finite numbers."""
+    if not isinstance(result, (list, tuple)) or len(result) == 0 or not all(_is_finite_number(v) for v in result):
+        return None
+    return [float(v) for v in result]
+
+
+def _register_with_the_sdk() -> None:
+    """Make :class:`BedrockEmbedder` an SDK ``Embedder``, on releases that have one (1.64.0 and later).
+
+    Its ``embed(text)`` already has the SDK's shape, since ``purpose`` defaults to ``"document"``.
+    """
+    try:
+        from strands.storage import search
+    except ImportError:  # pragma: no cover - releases before 1.54.0 have no search module
+        return
+    sdk_embedder = getattr(search, "Embedder", None)
+    if sdk_embedder is not None:
+        sdk_embedder.register(BedrockEmbedder)
+
+
+_register_with_the_sdk()

@@ -21,6 +21,8 @@ from .keys import normalize_key, normalize_prefix
 if TYPE_CHECKING:
     from strands.storage.search import SearchStrategy, StorageSearchResult
 
+    from .vector_search import DynamoDBVectorSearchStrategy
+
 # Single-table attribute names.
 _PK = "pk"
 _SK = "sk"
@@ -216,9 +218,10 @@ class DynamoDBStorage:
             vector_search: Adapter performing the native vector search.
             boto_session: Pre-configured boto3 session. Cannot be combined with region_name.
             boto_client_config: Botocore Config for the created clients.
-            search_strategy: Strategy for plain-string :meth:`search`. When set, :meth:`write`
-                indexes each value through it and a string query delegates to it; when
-                unset, a string query uses the SDK's keyword search. Shared with
+            search_strategy: Strategy for plain-string :meth:`search`, such as a
+                :class:`DynamoDBVectorSearchStrategy`. When set, :meth:`write` indexes each
+                value through it and a string query delegates to it; when unset, a string
+                query uses the SDK's keyword search. Shared with
                 :meth:`namespace` views. A :class:`SearchQuery` always uses the native
                 vector index.
 
@@ -268,17 +271,25 @@ class DynamoDBStorage:
 
         Values above the item-size limit offload to S3 when ``s3_bucket`` is set.
         An optional ``vector`` (kept inline for the native index) and ``metadata``
-        enable :meth:`search`. With a ``search_strategy``, the value is then indexed
-        through it.
+        enable :meth:`search`. With a :class:`DynamoDBVectorSearchStrategy` and no
+        ``vector``, the value is embedded first and its vector stored in the same
+        request. With another ``search_strategy``, the value is then indexed through it.
 
         Raises:
             StorageError: If the key is invalid, the value is oversized with no S3
-                bucket configured, the write fails, or the search strategy fails to
-                index the value (the value is stored in that case).
+                bucket configured, the write fails, embedding for a
+                :class:`DynamoDBVectorSearchStrategy` fails (nothing is stored then), or
+                another search strategy fails to index the value (the value is stored then).
         """
         normalized = normalize_key(key)
         full = f"{self._prefix}{normalized}"
         pk, sk = self._split(full)
+        embedding = self._embedding_strategy()
+        if vector is None and embedding is not None:
+            try:
+                vector = await embedding._document_vector(self, data)
+            except Exception as error:
+                raise StorageError(f"Failed to embed '{normalized}' for search, so nothing was written") from error
 
         extra: dict[str, Any] = {}
         # The embedding stays inline even when the payload offloads, because the
@@ -338,7 +349,7 @@ class DynamoDBStorage:
             raise StorageError(f"Failed to write '{normalized}' to DynamoDB table '{self._table_name}'") from error
 
         # `SearchStrategy` gained `index` in strands-agents 1.56.0; a strategy from an older release has none.
-        index = getattr(self._search_strategy, "index", None)
+        index = None if embedding is not None else getattr(self._search_strategy, "index", None)
         if index is not None:
             try:
                 await index(self, normalized, data)
@@ -346,6 +357,13 @@ class DynamoDBStorage:
                 raise StorageError(
                     f"Wrote '{normalized}' to DynamoDB table '{self._table_name}' but indexing failed"
                 ) from error
+
+    def _embedding_strategy(self) -> Optional[DynamoDBVectorSearchStrategy]:
+        """The search strategy if it is a :class:`DynamoDBVectorSearchStrategy`, which :meth:`write` embeds for."""
+        from .vector_search import DynamoDBVectorSearchStrategy
+
+        strategy = self._search_strategy
+        return strategy if isinstance(strategy, DynamoDBVectorSearchStrategy) else None
 
     async def read(self, key: str) -> Optional[bytes]:
         """Retrieve the bytes stored under ``key``, or ``None`` if absent.
