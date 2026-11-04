@@ -797,17 +797,18 @@ async def test_passes_the_purpose_to_an_embed_method_with_an_optional_purpose_or
     assert calls == ["query", "query"]
 
 
-async def test_an_optional_extra_parameter_is_not_taken_for_the_purpose(ddb):
+async def test_an_optional_second_parameter_gets_the_purpose_whatever_its_name(ddb):
     calls = []
 
-    class WithDimensions:
-        async def embed(self, text, dimensions=None):
-            calls.append((text, dimensions))
+    class WithInputType:
+        async def embed(self, text, input_type="search_document"):
+            calls.append((text, input_type))
             return [1.0, 0.0]
 
-    store = make_store(ddb, embedder=WithDimensions())
+    store = make_store(ddb, embedder=WithInputType())
     await store.add("Prefers a window seat")
-    assert calls == [("Prefers a window seat", None)]
+    await store.search("window")
+    assert calls == [("Prefers a window seat", "document"), ("window", "query")]
 
 
 async def test_accepts_a_strands_sdk_embedder(ddb):

@@ -362,21 +362,17 @@ async def _call(function: Any, *args: Any) -> Any:
 def _takes_purpose(embed: Any) -> bool:
     """Whether an ``embed`` method takes the purpose as a second positional argument.
 
-    A required second parameter, or an optional one named ``purpose``, is the purpose; an
-    ``embed(text)`` with only optional extras takes the text alone. A signature that cannot be
-    read is assumed to take the purpose, as the :class:`Embedder` protocol does.
+    Any ``embed`` that accepts a second positional argument gets the purpose, whatever the
+    parameter is called; only one that takes the text alone, such as the SDK's
+    ``Embedder.embed``, is called without it. A signature that cannot be read is assumed to
+    take the purpose, as the :class:`Embedder` protocol does.
     """
     try:
         parameters = inspect.signature(embed).parameters.values()
     except (TypeError, ValueError):
         return True
-    if any(p.kind is p.VAR_POSITIONAL for p in parameters):
-        return True
     positional = [p for p in parameters if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)]
-    if len(positional) < 2:
-        return False
-    second = positional[1]
-    return second.default is second.empty or second.name == "purpose"
+    return len(positional) >= 2 or any(p.kind is p.VAR_POSITIONAL for p in parameters)
 
 
 def _check_limit(value: Any, label: str) -> None:
