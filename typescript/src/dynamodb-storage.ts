@@ -96,6 +96,17 @@ export interface DynamoDBSearchStrategy {
   search(storage: DynamoDBStorage, query: string): Promise<SearchResult[]>
 }
 
+/**
+ * A {@link DynamoDBSearchStrategy} that derives a value's vector itself, as
+ * `DynamoDBVectorSearchStrategy` does: `write` embeds through it and stores the vector on the
+ * item, rather than indexing the value in a second pass.
+ *
+ * @internal
+ */
+export interface EmbeddingSearchStrategy extends DynamoDBSearchStrategy {
+  _documentVector(storage: DynamoDBStorage, data: Uint8Array): Promise<number[] | undefined>
+}
+
 /** Configuration for {@link DynamoDBStorage}. */
 export interface DynamoDBStorageConfig {
   /** AWS region override. Ignored when `client` is supplied. */
@@ -283,7 +294,7 @@ export class DynamoDBStorage implements Storage<string | DynamoDBListQuery> {
     const full = `${this._prefix}${normalized}`
     const { pk, sk } = this._split(full)
     const extra: Record<string, unknown> = {}
-    const embedding = await this._embeddingStrategy()
+    const embedding = this._embeddingStrategy()
     let vector = options?.vector
     if (vector === undefined && embedding) {
       try {
@@ -351,6 +362,8 @@ export class DynamoDBStorage implements Storage<string | DynamoDBListQuery> {
       if (error instanceof StorageError) throw error
       throw new StorageError(`Failed to write '${normalized}' to DynamoDB table '${this._tableName}'`, { cause: error })
     }
+    // A strategy that embeds on write needs no separate indexing pass: its vector went in with
+    // the item above.
     if (!embedding && this._searchStrategy?.index) {
       try {
         await this._searchStrategy.index(this, normalized, data)
@@ -362,12 +375,16 @@ export class DynamoDBStorage implements Storage<string | DynamoDBListQuery> {
     }
   }
 
-  /** The search strategy if it is a `DynamoDBVectorSearchStrategy`, which `write` embeds for. */
-  private async _embeddingStrategy(): Promise<import('./vector-search.js').DynamoDBVectorSearchStrategy | undefined> {
-    if (!this._searchStrategy) return undefined
-    // Loaded here because the strategy's module imports this one.
-    const { DynamoDBVectorSearchStrategy } = await import('./vector-search.js')
-    return this._searchStrategy instanceof DynamoDBVectorSearchStrategy ? this._searchStrategy : undefined
+  /**
+   * The search strategy if it embeds values itself, which `write` stores the vector for.
+   *
+   * Recognized by shape rather than `instanceof`, so a strategy that forwards to a
+   * `DynamoDBVectorSearchStrategy` — or one from a second installed copy of this package,
+   * where `instanceof` fails — still embeds once per write rather than twice.
+   */
+  private _embeddingStrategy(): EmbeddingSearchStrategy | undefined {
+    const strategy = this._searchStrategy as EmbeddingSearchStrategy | undefined
+    return typeof strategy?._documentVector === 'function' ? strategy : undefined
   }
 
   /**
@@ -875,6 +892,49 @@ export class DynamoDBStorage implements Storage<string | DynamoDBListQuery> {
       })
     )
     return response.Attributes
+  }
+
+  /**
+   * Adds `vector` to the item already stored under `key`, touching nothing else.
+   *
+   * The backfill path behind a search strategy's `index`. Unlike `write`, which replaces the
+   * whole item, this updates one attribute, so the value, its metadata and its TTL survive —
+   * and a value written while the backfill was embedding is not rolled back.
+   *
+   * The update is conditional on the item existing and having no vector yet, so a vector derived
+   * from a value that has since been overwritten (with its own, current vector) cannot land on
+   * it, and a deleted item is not resurrected. Either rejection returns `false`: the item already
+   * carries a vector newer than this one, or there is no item.
+   *
+   * @returns Whether the vector was stored
+   * @throws {@link StorageError} if the key is invalid or the update fails
+   * @internal
+   */
+  async _setVector(key: string, vector: number[]): Promise<boolean> {
+    const normalized = normalizeKey(key)
+    const { pk, sk } = this._split(`${this._prefix}${normalized}`)
+    try {
+      const { UpdateCommand } = await import('@aws-sdk/lib-dynamodb')
+      const client = await this._getClient()
+      await client.send(
+        new UpdateCommand({
+          TableName: this._tableName,
+          Key: { [PK]: pk, [SK]: sk },
+          UpdateExpression: 'SET #vector = :vector',
+          ConditionExpression: 'attribute_exists(#pk) AND attribute_not_exists(#vector)',
+          ExpressionAttributeNames: { '#pk': PK, '#vector': this._vectorAttribute },
+          ExpressionAttributeValues: { ':vector': vector },
+        })
+      )
+    } catch (error: unknown) {
+      // Matched on the error's name rather than the modelled class, so an injected or stubbed
+      // client is read the same way an AWS SDK one is.
+      if ((error as { name?: string })?.name === 'ConditionalCheckFailedException') return false
+      throw new StorageError(`Failed to store the vector for '${normalized}' in DynamoDB table '${this._tableName}'`, {
+        cause: error,
+      })
+    }
+    return true
   }
 
   private async _getClient(): Promise<import('@aws-sdk/lib-dynamodb').DynamoDBDocumentClient> {

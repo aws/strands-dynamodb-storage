@@ -3,7 +3,13 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { SearchVectorsCommand, type SearchVectorsCommandInput } from '@aws-sdk/client-dynamodb'
-import { GetCommand, PutCommand, DeleteCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
+import {
+  GetCommand,
+  PutCommand,
+  DeleteCommand,
+  UpdateCommand,
+  type DynamoDBDocumentClient,
+} from '@aws-sdk/lib-dynamodb'
 import { marshall } from '@aws-sdk/util-dynamodb'
 import { StorageError } from '@strands-agents/sdk'
 import { Embedder as SdkEmbedder } from '@strands-agents/sdk/storage/search'
@@ -62,6 +68,23 @@ class FakeDocumentClient {
       this.items.delete(`${k.pk}\u0000${k.sk}`)
       return {}
     }
+    if (command instanceof UpdateCommand) {
+      // Only the shape `_setVector` issues: set one attribute, conditional on the item existing
+      // without it. The service names that rejection.
+      const input = command.input
+      expect(input.UpdateExpression).toBe('SET #vector = :vector')
+      expect(input.ConditionExpression).toBe('attribute_exists(#pk) AND attribute_not_exists(#vector)')
+      const k = input.Key as { pk: string; sk: string }
+      const item = this.items.get(`${k.pk}\u0000${k.sk}`)
+      const attribute = input.ExpressionAttributeNames!['#vector']!
+      if (!item || item[attribute] !== undefined) {
+        const rejected = new Error('The conditional request failed')
+        rejected.name = 'ConditionalCheckFailedException'
+        throw rejected
+      }
+      item[attribute] = input.ExpressionAttributeValues![':vector']
+      return {}
+    }
     throw new Error(`unexpected command ${(command as object | undefined)?.constructor?.name}`)
   }
 }
@@ -92,6 +115,25 @@ function setup(strategy: DynamoDBVectorSearchStrategy) {
     searchStrategy: strategy,
   })
   return { client, storage, item: (pk: string, sk: string) => client.items.get(`${pk}\u0000${sk}`) }
+}
+
+/** An item written without a strategy (so without a vector), plus a strategy-backed view of it. */
+async function preStrategyItem(
+  data: Uint8Array,
+  options?: { metadata?: Record<string, string | number | boolean>; ttlSeconds?: number }
+) {
+  const client = new FakeDocumentClient()
+  const asClient = client as unknown as DynamoDBDocumentClient
+  const plain = new DynamoDBStorage('test-table', {
+    client: asClient,
+    ...(options?.ttlSeconds !== undefined ? { ttlSeconds: options.ttlSeconds } : {}),
+  })
+  await plain.write('memory/facts/a', data, options?.metadata ? { metadata: options.metadata } : undefined)
+  const strategy = new DynamoDBVectorSearchStrategy({ embedder: new PurposeEmbedder() })
+  const storage = new DynamoDBStorage('test-table', { client: asClient, searchStrategy: strategy }).namespace(
+    'memory/facts'
+  )
+  return { client, view: { storage, strategy } }
 }
 
 describe('DynamoDBVectorSearchStrategy: construction', () => {
@@ -170,16 +212,114 @@ describe('DynamoDBVectorSearchStrategy: index', () => {
   })
 
   it('backfills a value written before the strategy', async () => {
-    const client = new FakeDocumentClient()
-    const asClient = client as unknown as DynamoDBDocumentClient
-    await new DynamoDBStorage('test-table', { client: asClient }).write('memory/facts/a', bytes('dark mode'))
+    const { client, view } = await preStrategyItem(bytes('dark mode'))
     expect(client.items.get('memory/facts\u0000a')?.vector).toBeUndefined()
-    const strategy = new DynamoDBVectorSearchStrategy({ embedder: new PurposeEmbedder() })
-    const view = new DynamoDBStorage('test-table', { client: asClient, searchStrategy: strategy }).namespace(
-      'memory/facts'
-    )
-    await strategy.index(view, 'a', (await view.read('a'))!)
+    await view.strategy.index(view.storage, 'a', (await view.storage.read('a'))!)
     expect(client.items.get('memory/facts\u0000a')?.vector).toEqual(words('dark mode'))
+    expect(await view.storage.read('a')).toEqual(bytes('dark mode'))
+  })
+
+  it("keeps the item's metadata and TTL", async () => {
+    const { client, view } = await preStrategyItem(bytes('dark mode'), {
+      metadata: { source: 'profile' },
+      ttlSeconds: 3600,
+    })
+    const before = { ...client.items.get(`memory/facts\u0000a`)! }
+    await view.strategy.index(view.storage, 'a', bytes('dark mode'))
+    const after = client.items.get(`memory/facts\u0000a`)!
+    expect(after['meta']).toEqual(before['meta'])
+    expect(after['expireAt']).toEqual(before['expireAt'])
+    expect(after['data']).toEqual(before['data'])
+    expect(after.vector).toEqual(words('dark mode'))
+  })
+
+  it('does not roll back a value written while it embedded', async () => {
+    const { client, view } = await preStrategyItem(bytes('dark mode'))
+    const stale = (await view.storage.read('a'))!
+    // The live write lands between the backfill's read and its index call.
+    await view.storage.write('a', bytes('coffee tea'))
+
+    await view.strategy.index(view.storage, 'a', stale)
+
+    expect(await view.storage.read('a')).toEqual(bytes('coffee tea'))
+    expect(client.items.get(`memory/facts\u0000a`)?.vector).toEqual(words('coffee tea'))
+  })
+
+  it('does not recreate a value that was deleted', async () => {
+    const strategy = new DynamoDBVectorSearchStrategy({ embedder: new PurposeEmbedder() })
+    const { client, storage } = setup(strategy)
+
+    await strategy.index(storage.namespace('memory/facts'), 'gone', bytes('dark mode'))
+
+    expect(client.items.size).toBe(0)
+  })
+
+  it.each([new Uint8Array(), bytes('   '), new Uint8Array([0xff, 0xfe])])(
+    'leaves an empty or binary value alone',
+    async (data) => {
+      const { client, view } = await preStrategyItem(data)
+      await view.strategy.index(view.storage, 'a', data)
+      expect(client.items.get(`memory/facts\u0000a`)?.vector).toBeUndefined()
+      expect(await view.storage.read('a')).toEqual(data)
+    }
+  )
+
+  it('reports a failed vector write as a StorageError', async () => {
+    const { client, view } = await preStrategyItem(bytes('dark mode'))
+    vi.spyOn(client, 'send').mockRejectedValue(new Error('table throttled'))
+
+    const indexing = view.strategy.index(view.storage, 'a', bytes('dark mode'))
+
+    await expect(indexing).rejects.toBeInstanceOf(StorageError)
+    await expect(indexing).rejects.toThrow("Failed to store the vector for 'a'")
+  })
+})
+
+describe('DynamoDBVectorSearchStrategy: strategies that wrap it', () => {
+  it('indexes through a forwarding strategy without re-entering write', async () => {
+    const embedder = new PurposeEmbedder()
+    const inner = new DynamoDBVectorSearchStrategy({ embedder })
+    const indexed: string[] = []
+    // The kind of wrapper a consumer writes to log or meter a strategy: it forwards, and is not one.
+    const wrapper = {
+      async index(storage: DynamoDBStorage, key: string, data: Uint8Array) {
+        indexed.push(key)
+        await inner.index(storage, key, data)
+      },
+      search: (storage: DynamoDBStorage, query: string) => inner.search(storage, query),
+    }
+    const client = new FakeDocumentClient()
+    const view = new DynamoDBStorage('test-table', {
+      client: client as unknown as DynamoDBDocumentClient,
+      searchStrategy: wrapper,
+    }).namespace('memory/facts')
+
+    await view.write('a', bytes('dark mode'))
+
+    expect(indexed).toEqual(['a'])
+    expect(embedder.calls).toEqual([['dark mode', 'document']])
+    expect(client.items.get(`memory/facts\u0000a`)?.vector).toEqual(words('dark mode'))
+    expect(await view.read('a')).toEqual(bytes('dark mode'))
+  })
+
+  it('embeds once for a strategy from a second installed copy, which instanceof misses', async () => {
+    const embedder = new PurposeEmbedder()
+    const inner = new DynamoDBVectorSearchStrategy({ embedder })
+    // A second installed copy of this package has its own class, so `instanceof` fails on its
+    // instances. Stand that in with the same methods on a plain object.
+    const copy = {
+      _documentVector: inner._documentVector.bind(inner),
+      index: vi.fn(inner.index.bind(inner)),
+      search: inner.search.bind(inner),
+    }
+    expect(copy instanceof DynamoDBVectorSearchStrategy).toBe(false)
+    const { client, storage } = setup(copy as unknown as DynamoDBVectorSearchStrategy)
+
+    await storage.write('memory/facts/a', bytes('dark mode'))
+
+    expect(embedder.calls).toEqual([['dark mode', 'document']])
+    expect(copy.index).not.toHaveBeenCalled()
+    expect(client.items.get(`memory/facts\u0000a`)?.vector).toEqual(words('dark mode'))
   })
 })
 
@@ -252,6 +392,27 @@ describe('DynamoDBVectorSearchStrategy: search', () => {
       vectorSearch: async () => [{ key: 'memory/facts/a', score: 7.5 }],
     })
     expect((await storage.namespace('memory/facts').search('dark')).map((r) => r.score)).toEqual([7.5])
+  })
+})
+
+describe('DynamoDBVectorSearchStrategy: embedder failures', () => {
+  it('reports a query the embedder cannot embed', async () => {
+    const view = setup(new DynamoDBVectorSearchStrategy({ embedder: () => [] })).storage.namespace('memory/facts')
+    await expect(view.search('dark')).rejects.toThrow(/non-empty array of finite numbers/)
+  })
+
+  it("passes a StorageError from the embedder through as the write's cause", async () => {
+    const cause = new StorageError('embedding quota exhausted')
+    const { storage } = setup(
+      new DynamoDBVectorSearchStrategy({
+        embedder: async () => {
+          throw cause
+        },
+      })
+    )
+    const write = storage.write('memory/facts/a', bytes('dark mode'))
+    await expect(write).rejects.toThrow(/nothing was written/)
+    await expect(write.catch((error: unknown) => (error as { cause?: unknown }).cause)).resolves.toBe(cause)
   })
 })
 

@@ -12,7 +12,7 @@ import math
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional, Union, overload
+from typing import TYPE_CHECKING, Any, Optional, Union, cast, overload
 
 from strands.types.exceptions import StorageError
 
@@ -147,6 +147,18 @@ def _client_config(config: Any) -> Any:
     if not getattr(config, "user_agent_extra", None):
         return config.merge(Config(user_agent_extra=_USER_AGENT_MARKER))
     return config
+
+
+def _is_conditional_check_failure(error: BaseException) -> bool:
+    """True when ``error`` is DynamoDB rejecting a write's ``ConditionExpression``.
+
+    Matched on the service error code rather than a client's exception class, so an injected
+    or stubbed client is read the same way a boto3 one is.
+    """
+    response = getattr(error, "response", None)
+    if isinstance(response, dict) and response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+        return True
+    return type(error).__name__ == "ConditionalCheckFailedException"
 
 
 class DynamoDBStorage:
@@ -348,7 +360,8 @@ class DynamoDBStorage:
         except Exception as error:
             raise StorageError(f"Failed to write '{normalized}' to DynamoDB table '{self._table_name}'") from error
 
-        # `SearchStrategy` gained `index` in strands-agents 1.56.0; a strategy from an older release has none.
+        # A strategy that embeds on write needs no separate indexing pass: its vector went in with
+        # the item above. `SearchStrategy` gained `index` in strands-agents 1.56.0; older ones have none.
         index = None if embedding is not None else getattr(self._search_strategy, "index", None)
         if index is not None:
             try:
@@ -359,11 +372,16 @@ class DynamoDBStorage:
                 ) from error
 
     def _embedding_strategy(self) -> Optional[DynamoDBVectorSearchStrategy]:
-        """The search strategy if it is a :class:`DynamoDBVectorSearchStrategy`, which :meth:`write` embeds for."""
-        from .vector_search import DynamoDBVectorSearchStrategy
+        """The search strategy if it embeds values itself, which :meth:`write` stores the vector for.
 
+        Recognized by shape rather than ``isinstance``, so a strategy that forwards to a
+        :class:`DynamoDBVectorSearchStrategy` -- or one from a second installed copy of this
+        package -- still embeds once per write rather than twice.
+        """
         strategy = self._search_strategy
-        return strategy if isinstance(strategy, DynamoDBVectorSearchStrategy) else None
+        if callable(getattr(strategy, "_document_vector", None)):
+            return cast("DynamoDBVectorSearchStrategy", strategy)
+        return None
 
     async def read(self, key: str) -> Optional[bytes]:
         """Retrieve the bytes stored under ``key``, or ``None`` if absent.
@@ -877,6 +895,43 @@ class DynamoDBStorage:
         response = await asyncio.to_thread(client.put_item, **kwargs)
         attributes: dict[str, Any] = response.get("Attributes", {})
         return attributes
+
+    async def _set_vector(self, key: str, vector: builtins.list[float]) -> bool:
+        """Add ``vector`` to the item already stored under ``key``, touching nothing else.
+
+        The backfill path behind a search strategy's ``index``. Unlike :meth:`write`, which
+        replaces the whole item, this updates one attribute, so the value, its metadata and its
+        TTL survive -- and a value written while the backfill was embedding is not rolled back.
+
+        The update is conditional on the item existing and having no vector yet, so a vector
+        derived from a value that has since been overwritten (with its own, current vector)
+        cannot land on it, and a deleted item is not resurrected. Either rejection returns
+        ``False``: the item already carries a vector newer than this one, or there is no item.
+
+        Raises:
+            StorageError: If the key is invalid or the update fails.
+        """
+        normalized = normalize_key(key)
+        full = f"{self._prefix}{normalized}"
+        pk, sk = self._split(full)
+        client = self._get_client()
+        try:
+            await asyncio.to_thread(
+                client.update_item,
+                TableName=self._table_name,
+                Key={_PK: {"S": pk}, _SK: {"S": sk}},
+                UpdateExpression="SET #vector = :vector",
+                ConditionExpression="attribute_exists(#pk) AND attribute_not_exists(#vector)",
+                ExpressionAttributeNames={"#pk": _PK, "#vector": self._vector_attribute},
+                ExpressionAttributeValues={":vector": {"L": [{"N": str(component)} for component in vector]}},
+            )
+        except Exception as error:
+            if _is_conditional_check_failure(error):
+                return False
+            raise StorageError(
+                f"Failed to store the vector for '{normalized}' in DynamoDB table '{self._table_name}'"
+            ) from error
+        return True
 
     def _s3_key(self, full_key: str) -> str:
         return f"{self._s3_prefix}{full_key}"

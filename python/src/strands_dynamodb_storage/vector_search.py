@@ -78,22 +78,26 @@ class DynamoDBVectorSearchStrategy:
         self._distance_function = distance_function
 
     async def index(self, storage: DynamoDBStorage, key: str, data: bytes, **kwargs: Any) -> None:
-        """Rewrite ``data`` under ``key`` with its vector.
+        """Add the vector for ``data`` to the item stored under ``key``.
 
         ``write`` already stores the vector in the same request and does not call this; use it to
-        backfill a value written before the strategy was configured. The rewrite replaces the
-        item, so metadata stored with it is dropped and its TTL restarts.
+        backfill a value written before the strategy was configured. Only the vector is written,
+        so the stored value, its metadata and its TTL are left as they are. A no-op when the item
+        already has a vector, when it is gone, and when ``data`` is empty or not UTF-8.
 
         Args:
             storage: The storage the value is in.
             key: The key, relative to ``storage``.
-            data: The value's bytes.
+            data: The value's bytes, as :meth:`DynamoDBStorage.read` returns them.
             **kwargs: Unused; accepted for forward compatibility.
 
         Raises:
             StorageError: If embedding or the write fails.
         """
-        await storage.write(key, data, vector=await self._document_vector(storage, data))
+        vector = await self._document_vector(storage, data)
+        if vector is None:
+            return
+        await storage._set_vector(key, vector)
 
     async def search(self, storage: DynamoDBStorage, query: str, **kwargs: Any) -> builtins.list[StorageSearchResult]:
         """Return the stored values nearest ``query``, best first, with their bytes as ``data``.

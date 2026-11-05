@@ -4,8 +4,8 @@
 import { StorageError } from '@strands-agents/sdk'
 import {
   storageRegion,
-  type DynamoDBSearchStrategy,
   type DynamoDBStorage,
+  type EmbeddingSearchStrategy,
   type SearchResult,
 } from './dynamodb-storage.js'
 import {
@@ -58,7 +58,7 @@ export interface DynamoDBVectorSearchStrategyConfig {
  * const knowledge = new FileMemoryStore({ name: 'facts', storage })
  * ```
  */
-export class DynamoDBVectorSearchStrategy implements DynamoDBSearchStrategy {
+export class DynamoDBVectorSearchStrategy implements EmbeddingSearchStrategy {
   private _embedder: Embedder | EmbedFunction | undefined
   private readonly _maxResults: number
   private readonly _distanceFunction: DistanceFunction
@@ -82,20 +82,22 @@ export class DynamoDBVectorSearchStrategy implements DynamoDBSearchStrategy {
   }
 
   /**
-   * Rewrites `data` under `key` with its vector.
+   * Adds the vector for `data` to the item stored under `key`.
    *
    * `write` already stores the vector in the same request and does not call this; use it to backfill a
-   * value written before the strategy was configured. The rewrite replaces the item, so metadata stored
-   * with it is dropped and its TTL restarts.
+   * value written before the strategy was configured. Only the vector is written, so the stored value,
+   * its metadata and its TTL are left as they are. A no-op when the item already has a vector, when it
+   * is gone, and when `data` is empty or not UTF-8.
    *
    * @param storage - The storage the value is in
    * @param key - The key, relative to `storage`
-   * @param data - The value's bytes
+   * @param data - The value's bytes, as `read` returns them
    * @throws {@link StorageError} if embedding or the write fails
    */
   async index(storage: DynamoDBStorage, key: string, data: Uint8Array): Promise<void> {
     const vector = await this._documentVector(storage, data)
-    await storage.write(key, data, vector !== undefined ? { vector } : undefined)
+    if (vector === undefined) return
+    await storage._setVector(key, vector)
   }
 
   /**

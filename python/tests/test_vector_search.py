@@ -59,6 +59,21 @@ class PurposeEmbedder:
         return words(text)
 
 
+class ForwardingStrategy:
+    """A wrapper of the kind a consumer writes to log or meter a strategy: it forwards, and is not one."""
+
+    def __init__(self, inner: DynamoDBVectorSearchStrategy) -> None:
+        self.inner = inner
+        self.indexed: list[str] = []
+
+    async def index(self, storage, key, data) -> None:
+        self.indexed.append(key)
+        await self.inner.index(storage, key, data)
+
+    async def search(self, storage, query):
+        return await self.inner.search(storage, query)
+
+
 def distance_adapter(ddb, requests: list[dict[str, Any]]):
     """Brute-force cosine *distance* over stored vectors, lower closer, as the service scores COSINE."""
 
@@ -172,6 +187,38 @@ async def test_write_embeds_once_and_does_not_call_index(aws, monkeypatch):
     assert embedder.calls == [("dark mode", "document")]
 
 
+async def test_a_strategy_forwarding_to_this_one_indexes_through_it_without_re_entering_write(aws):
+    embedder = PurposeEmbedder()
+    wrapper = ForwardingStrategy(DynamoDBVectorSearchStrategy(embedder=embedder))
+    view = vector_storage(aws, wrapper).namespace("memory/facts")
+
+    await view.write("a", b"dark mode")
+
+    assert wrapper.indexed == ["a"]
+    assert embedder.calls == [("dark mode", "document")]
+    assert [float(n["N"]) for n in raw_item(aws[0], "memory/facts/a")["vector"]["L"]] == words("dark mode")
+    assert await view.read("a") == b"dark mode"
+
+
+async def test_a_second_installed_copy_of_the_strategy_still_embeds_once(aws):
+    """``isinstance`` fails across two copies of this package; the write path must not embed twice."""
+    name = f"{vector_search_module.__package__}._vector_search_copy"
+    spec = importlib.util.spec_from_file_location(name, vector_search_module.__file__)
+    copy = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(copy)  # type: ignore[union-attr]
+    embedder = PurposeEmbedder()
+    strategy = copy.DynamoDBVectorSearchStrategy(embedder=embedder)
+    assert not isinstance(strategy, DynamoDBVectorSearchStrategy)
+
+    await vector_storage(aws, strategy).namespace("memory/facts").write("a", b"dark mode")
+
+    assert embedder.calls == [("dark mode", "document")]
+    assert [float(n["N"]) for n in raw_item(aws[0], "memory/facts/a")["vector"]["L"]] == words("dark mode")
+
+
+# ---------------------------------------------------------------- index (backfill)
+
+
 async def test_index_backfills_a_value_written_before_the_strategy(aws):
     await make(aws).write("memory/facts/a", b"dark mode")
     assert "vector" not in raw_item(aws[0], "memory/facts/a")
@@ -182,6 +229,72 @@ async def test_index_backfills_a_value_written_before_the_strategy(aws):
 
     assert [float(n["N"]) for n in raw_item(aws[0], "memory/facts/a")["vector"]["L"]] == words("dark mode")
     assert await view.read("a") == b"dark mode"
+
+
+async def test_index_keeps_the_items_metadata_and_ttl(aws):
+    plain = make(aws, ttl_seconds=3600)
+    await plain.write("memory/facts/a", b"dark mode", metadata={"source": "profile"})
+    before = raw_item(aws[0], "memory/facts/a")
+    strategy = DynamoDBVectorSearchStrategy(embedder=PurposeEmbedder())
+    view = vector_storage(aws, strategy).namespace("memory/facts")
+
+    await strategy.index(view, "a", b"dark mode")
+
+    after = raw_item(aws[0], "memory/facts/a")
+    assert after["meta"] == before["meta"]
+    assert after["expireAt"] == before["expireAt"]
+    assert after["data"]["B"] == b"dark mode"
+    assert [float(n["N"]) for n in after["vector"]["L"]] == words("dark mode")
+
+
+async def test_index_does_not_roll_back_a_value_written_while_it_embedded(aws):
+    plain = make(aws)
+    await plain.write("memory/facts/a", b"dark mode")
+    stale = await plain.read("memory/facts/a")
+    strategy = DynamoDBVectorSearchStrategy(embedder=PurposeEmbedder())
+    view = vector_storage(aws, strategy).namespace("memory/facts")
+    # The live write lands between the backfill's read and its index call.
+    await view.write("a", b"coffee tea")
+
+    await strategy.index(view, "a", stale)
+
+    assert await view.read("a") == b"coffee tea"
+    assert [float(n["N"]) for n in raw_item(aws[0], "memory/facts/a")["vector"]["L"]] == words("coffee tea")
+
+
+async def test_index_does_not_recreate_a_value_that_was_deleted(aws):
+    strategy = DynamoDBVectorSearchStrategy(embedder=PurposeEmbedder())
+    view = vector_storage(aws, strategy).namespace("memory/facts")
+
+    await strategy.index(view, "gone", b"dark mode")
+
+    assert raw_item(aws[0], "memory/facts/gone") is None
+
+
+@pytest.mark.parametrize("data", [b"", b"   ", b"\xff\xfe"])
+async def test_index_leaves_an_empty_or_binary_value_alone(aws, data):
+    await make(aws).write("memory/facts/a", data)
+    strategy = DynamoDBVectorSearchStrategy(embedder=PurposeEmbedder())
+    view = vector_storage(aws, strategy).namespace("memory/facts")
+
+    await strategy.index(view, "a", data)
+
+    assert "vector" not in raw_item(aws[0], "memory/facts/a")
+    assert await view.read("a") == data
+
+
+async def test_a_failed_index_write_is_reported_as_a_storage_error(aws, monkeypatch):
+    strategy = DynamoDBVectorSearchStrategy(embedder=PurposeEmbedder())
+    view = vector_storage(aws, strategy).namespace("memory/facts")
+    await make(aws).write("memory/facts/a", b"dark mode")
+
+    def boom(**kwargs):
+        raise RuntimeError("table throttled")
+
+    monkeypatch.setattr(aws[0], "update_item", boom)
+
+    with pytest.raises(StorageError, match="Failed to store the vector for 'a'"):
+        await strategy.index(view, "a", b"dark mode")
 
 
 # ---------------------------------------------------------------- search
@@ -268,6 +381,27 @@ async def test_dot_product_scores_are_returned_as_the_index_gives_them(aws):
     ).namespace("memory/facts")
 
     assert [result.score for result in await view.search("dark")] == [7.5]
+
+
+@needs_storage_search
+async def test_a_query_the_embedder_cannot_embed_is_reported(aws):
+    view = vector_storage(aws, DynamoDBVectorSearchStrategy(embedder=lambda text: [])).namespace("memory/facts")
+
+    with pytest.raises(StorageError, match="non-empty list of finite numbers"):
+        await view.search("dark")
+
+
+async def test_a_storage_error_from_the_embedder_is_passed_through_as_the_cause(aws):
+    class Failing:
+        async def embed(self, text, purpose):
+            raise StorageError("embedding quota exhausted")
+
+    storage = vector_storage(aws, DynamoDBVectorSearchStrategy(embedder=Failing()))
+
+    with pytest.raises(StorageError, match="nothing was written") as error:
+        await storage.write("memory/facts/a", b"dark mode")
+
+    assert "embedding quota exhausted" in str(error.value.__cause__)
 
 
 # ---------------------------------------------------------------- embedder shapes
