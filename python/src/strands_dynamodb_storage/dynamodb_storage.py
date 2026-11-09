@@ -12,11 +12,16 @@ import math
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any, Optional, Union
+from typing import TYPE_CHECKING, Any, Optional, Union, cast, overload
 
 from strands.types.exceptions import StorageError
 
 from .keys import normalize_key, normalize_prefix
+
+if TYPE_CHECKING:
+    from strands.storage.search import SearchStrategy, StorageSearchResult
+
+    from .vector_search import DynamoDBVectorSearchStrategy
 
 # Single-table attribute names.
 _PK = "pk"
@@ -144,6 +149,18 @@ def _client_config(config: Any) -> Any:
     return config
 
 
+def _is_conditional_check_failure(error: BaseException) -> bool:
+    """True when ``error`` is DynamoDB rejecting a write's ``ConditionExpression``.
+
+    Matched on the service error code rather than a client's exception class, so an injected
+    or stubbed client is read the same way a boto3 one is.
+    """
+    response = getattr(error, "response", None)
+    if isinstance(response, dict) and response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+        return True
+    return type(error).__name__ == "ConditionalCheckFailedException"
+
+
 class DynamoDBStorage:
     """DynamoDB ``Storage`` backend (single-table design).
 
@@ -155,9 +172,10 @@ class DynamoDBStorage:
 
     Values above the 400 KB item limit are offloaded to S3 when ``s3_bucket`` is set;
     a small pointer item stays in DynamoDB. Optional transparent gzip compression,
-    optional DynamoDB-native TTL (with read/list filtering of expired items), and an
-    optional native vector ``search`` complete the feature set. boto3 is imported
-    lazily, so applications that never construct this class don't pay the import cost.
+    optional DynamoDB-native TTL (with read/list filtering of expired items), an
+    optional native vector ``search``, and an optional ``search_strategy`` for text
+    search complete the feature set. boto3 is imported lazily, so applications that
+    never construct this class don't pay the import cost.
 
     Example:
         ```python
@@ -188,6 +206,7 @@ class DynamoDBStorage:
         vector_search: Optional[VectorSearchAdapter] = None,
         boto_session: Any = None,
         boto_client_config: Any = None,
+        search_strategy: Optional[SearchStrategy[DynamoDBStorage]] = None,
     ) -> None:
         """Initialize the backend.
 
@@ -211,6 +230,12 @@ class DynamoDBStorage:
             vector_search: Adapter performing the native vector search.
             boto_session: Pre-configured boto3 session. Cannot be combined with region_name.
             boto_client_config: Botocore Config for the created clients.
+            search_strategy: Strategy for plain-string :meth:`search`, such as a
+                :class:`DynamoDBVectorSearchStrategy`. When set, :meth:`write` indexes each
+                value through it and a string query delegates to it; when unset, a string
+                query uses the SDK's keyword search. Shared with
+                :meth:`namespace` views. A :class:`SearchQuery` always uses the native
+                vector index.
 
         Raises:
             StorageError: If both ``client`` and ``region_name`` are provided.
@@ -234,6 +259,16 @@ class DynamoDBStorage:
         self._vector_search = vector_search
         self._boto_session = boto_session
         self._boto_client_config = boto_client_config
+        self._search_strategy = search_strategy
+
+    @property
+    def prefix(self) -> str:
+        """The normalized key prefix (ending in ``/``), or ``""`` when none was configured.
+
+        A search strategy that keeps its own index keys it by ``storage.prefix + key``, so the
+        :meth:`namespace` views that share it stay apart.
+        """
+        return self._prefix
 
     async def write(
         self,
@@ -248,15 +283,25 @@ class DynamoDBStorage:
 
         Values above the item-size limit offload to S3 when ``s3_bucket`` is set.
         An optional ``vector`` (kept inline for the native index) and ``metadata``
-        enable :meth:`search`.
+        enable :meth:`search`. With a :class:`DynamoDBVectorSearchStrategy` and no
+        ``vector``, the value is embedded first and its vector stored in the same
+        request. With another ``search_strategy``, the value is then indexed through it.
 
         Raises:
             StorageError: If the key is invalid, the value is oversized with no S3
-                bucket configured, or the write fails.
+                bucket configured, the write fails, embedding for a
+                :class:`DynamoDBVectorSearchStrategy` fails (nothing is stored then), or
+                another search strategy fails to index the value (the value is stored then).
         """
         normalized = normalize_key(key)
         full = f"{self._prefix}{normalized}"
         pk, sk = self._split(full)
+        embedding = self._embedding_strategy()
+        if vector is None and embedding is not None:
+            try:
+                vector = await embedding._document_vector(self, data)
+            except Exception as error:
+                raise StorageError(f"Failed to embed '{normalized}' for search, so nothing was written") from error
 
         extra: dict[str, Any] = {}
         # The embedding stays inline even when the payload offloads, because the
@@ -315,6 +360,29 @@ class DynamoDBStorage:
         except Exception as error:
             raise StorageError(f"Failed to write '{normalized}' to DynamoDB table '{self._table_name}'") from error
 
+        # A strategy that embeds on write needs no separate indexing pass: its vector went in with
+        # the item above. `SearchStrategy` gained `index` in strands-agents 1.56.0; older ones have none.
+        index = None if embedding is not None else getattr(self._search_strategy, "index", None)
+        if index is not None:
+            try:
+                await index(self, normalized, data)
+            except Exception as error:
+                raise StorageError(
+                    f"Wrote '{normalized}' to DynamoDB table '{self._table_name}' but indexing failed"
+                ) from error
+
+    def _embedding_strategy(self) -> Optional[DynamoDBVectorSearchStrategy]:
+        """The search strategy if it embeds values itself, which :meth:`write` stores the vector for.
+
+        Recognized by shape rather than ``isinstance``, so a strategy that forwards to a
+        :class:`DynamoDBVectorSearchStrategy` -- or one from a second installed copy of this
+        package -- still embeds once per write rather than twice.
+        """
+        strategy = self._search_strategy
+        if callable(getattr(strategy, "_document_vector", None)):
+            return cast("DynamoDBVectorSearchStrategy", strategy)
+        return None
+
     async def read(self, key: str) -> Optional[bytes]:
         """Retrieve the bytes stored under ``key``, or ``None`` if absent.
 
@@ -353,8 +421,11 @@ class DynamoDBStorage:
     async def delete(self, key: str) -> None:
         """Delete the value under ``key`` (and any offloaded S3 object). No-op if absent.
 
+        With a ``search_strategy`` that has a ``remove`` method, its index entry is removed too.
+
         Raises:
-            StorageError: If the key is invalid or the delete fails.
+            StorageError: If the key is invalid, the delete fails, or the search strategy fails
+                to remove the index entry (the value is deleted in that case).
         """
         normalized = normalize_key(key)
         full = f"{self._prefix}{normalized}"
@@ -373,6 +444,16 @@ class DynamoDBStorage:
             raise
         except Exception as error:
             raise StorageError(f"Failed to delete '{normalized}' from DynamoDB table '{self._table_name}'") from error
+
+        remove = getattr(self._search_strategy, "remove", None)
+        if remove is not None:
+            try:
+                await remove(self, normalized)
+            except Exception as error:
+                raise StorageError(
+                    f"Deleted '{normalized}' from DynamoDB table '{self._table_name}' "
+                    "but removing its index entry failed"
+                ) from error
 
     async def list(self, query: Union[str, DynamoDBListQuery]) -> builtins.list[str]:
         """List keys, sorted ascending.
@@ -427,6 +508,8 @@ class DynamoDBStorage:
             kwargs["boto_session"] = self._boto_session
         if self._boto_client_config is not None:
             kwargs["boto_client_config"] = self._boto_client_config
+        if self._search_strategy is not None:
+            kwargs["search_strategy"] = self._search_strategy
         return DynamoDBStorage(self._table_name, **kwargs)
 
     def partition_key(self, key: str) -> str:
@@ -441,8 +524,19 @@ class DynamoDBStorage:
         """
         return self._split(f"{self._prefix}{normalize_key(key)}")[0]
 
-    async def search(self, query: Union[SearchQuery, str]) -> builtins.list[SearchResult]:
-        """Nearest-neighbour vector search over items written with a ``vector``.
+    @overload
+    async def search(self, query: SearchQuery) -> builtins.list[SearchResult]: ...
+
+    @overload
+    async def search(self, query: str) -> builtins.list[StorageSearchResult]: ...
+
+    async def search(
+        self, query: Union[SearchQuery, str]
+    ) -> Union[builtins.list[SearchResult], builtins.list[StorageSearchResult]]:
+        """Nearest-neighbour search for a :class:`SearchQuery`, or text search for a string.
+
+        A :class:`SearchQuery` searches the native vector index over items written
+        with a ``vector``.
 
         Optional part of the ``Storage`` contract — consumers feature-detect
         (``hasattr(storage, "search")``) and fall back to client-side KNN when absent.
@@ -463,19 +557,43 @@ class DynamoDBStorage:
         does not return it) is kept. Expired matches are not back-filled, so a
         search can return fewer than ``top_k`` results.
 
-        This store does not embed text. A plain-string query, which the SDK's
-        ``Storage`` contract allows, is rejected: use :class:`DynamoDBMemoryStore`
-        for text search, or embed the text and pass a :class:`SearchQuery`.
+        A plain-string query, which the SDK's ``Storage`` contract allows, goes to
+        the ``search_strategy``, or without one to the SDK's keyword search (which
+        needs strands-agents 1.54.0 or later). Keyword search lists every key, so it
+        works on a namespace at least two segments deep, such as
+        ``storage.namespace("user/u1")``; on a broader storage the listing is
+        rejected as too broad. Its results are ranked best-first with higher scores
+        more relevant. For search by meaning over the native vector index, use
+        :class:`DynamoDBMemoryStore`, or embed the text and pass a :class:`SearchQuery`.
 
         Raises:
-            StorageError: If the query is a plain string, the search fails, or
-                ``top_k`` is out of range.
+            StorageError: If the search or the search strategy fails, or ``top_k``
+                is out of range.
         """
+        if isinstance(query, str):
+            return await self._search_text(query)
         return await self._search(query)
 
-    async def _search(
-        self, query: Union[SearchQuery, str], key_prefix: Optional[str] = None
-    ) -> builtins.list[SearchResult]:
+    async def _search_text(self, query: str) -> builtins.list[StorageSearchResult]:
+        """Search by text through the search strategy, or keyword search without one."""
+        if self._search_strategy is not None:
+            try:
+                return await self._search_strategy.search(self, query)
+            except StorageError:
+                raise
+            except Exception as error:
+                raise StorageError(f"Failed to search DynamoDB table '{self._table_name}'") from error
+        try:
+            from strands.storage.search import KeywordSearchStrategy
+        except ImportError as error:
+            raise StorageError(
+                "Plain-string DynamoDBStorage.search needs strands-agents 1.54.0 or later for keyword search. "
+                "Upgrade strands-agents, set search_strategy, or embed the text and pass "
+                "SearchQuery(vector=..., top_k=...)."
+            ) from error
+        return await KeywordSearchStrategy().search(self, query)
+
+    async def _search(self, query: SearchQuery, key_prefix: Optional[str] = None) -> builtins.list[SearchResult]:
         """:meth:`search`, keeping only keys that start with ``key_prefix``.
 
         ``key_prefix`` is relative to this storage's namespace. Other keys are
@@ -483,12 +601,6 @@ class DynamoDBStorage:
         that the caller would discard costs no point read. Used by
         :class:`DynamoDBMemoryStore`, which shares its partition with other items.
         """
-        if isinstance(query, str):
-            raise StorageError(
-                "DynamoDBStorage.search requires a SearchQuery with a pre-computed embedding vector. "
-                "Plain-string queries are not supported: embed the text first and pass "
-                "SearchQuery(vector=..., top_k=...), or use DynamoDBMemoryStore, which embeds text for you."
-            )
         if query.pk is not None:
             self._assert_pk_in_scope(query.pk)
         try:
@@ -783,6 +895,43 @@ class DynamoDBStorage:
         response = await asyncio.to_thread(client.put_item, **kwargs)
         attributes: dict[str, Any] = response.get("Attributes", {})
         return attributes
+
+    async def _set_vector(self, key: str, vector: builtins.list[float]) -> bool:
+        """Add ``vector`` to the item already stored under ``key``, touching nothing else.
+
+        The backfill path behind a search strategy's ``index``. Unlike :meth:`write`, which
+        replaces the whole item, this updates one attribute, so the value, its metadata and its
+        TTL survive -- and a value written while the backfill was embedding is not rolled back.
+
+        The update is conditional on the item existing and having no vector yet, so a vector
+        derived from a value that has since been overwritten (with its own, current vector)
+        cannot land on it, and a deleted item is not resurrected. Either rejection returns
+        ``False``: the item already carries a vector newer than this one, or there is no item.
+
+        Raises:
+            StorageError: If the key is invalid or the update fails.
+        """
+        normalized = normalize_key(key)
+        full = f"{self._prefix}{normalized}"
+        pk, sk = self._split(full)
+        client = self._get_client()
+        try:
+            await asyncio.to_thread(
+                client.update_item,
+                TableName=self._table_name,
+                Key={_PK: {"S": pk}, _SK: {"S": sk}},
+                UpdateExpression="SET #vector = :vector",
+                ConditionExpression="attribute_exists(#pk) AND attribute_not_exists(#vector)",
+                ExpressionAttributeNames={"#pk": _PK, "#vector": self._vector_attribute},
+                ExpressionAttributeValues={":vector": {"L": [{"N": str(component)} for component in vector]}},
+            )
+        except Exception as error:
+            if _is_conditional_check_failure(error):
+                return False
+            raise StorageError(
+                f"Failed to store the vector for '{normalized}' in DynamoDB table '{self._table_name}'"
+            ) from error
+        return True
 
     def _s3_key(self, full_key: str) -> str:
         return f"{self._s3_prefix}{full_key}"
