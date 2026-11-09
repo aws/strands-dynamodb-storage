@@ -274,6 +274,9 @@ const storage = new DynamoDBStorage('agent-memory', { searchStrategy: new Dynamo
 const knowledge = new FileMemoryStore({ name: 'facts', storage })
 ```
 
+`FileMemoryStore` recalls through the storage's search on `@strands-agents/sdk` 1.22.0 or later. Releases 1.16.0 to
+1.21.0 ignore it and scan by keyword.
+
 Every write through the storage is embedded, so give the strategy a storage of its own rather than the agent's.
 Searches are pinned to one partition, so use it on a storage namespaced at least two segments deep, as
 `FileMemoryStore`'s `memory/<name>` is. Each value is embedded whole and must fit the embedding model's input; if
