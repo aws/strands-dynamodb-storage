@@ -66,7 +66,7 @@ Create a table with a string partition key `pk` and a string sort key `sk`, then
 
 Set `storage` once on the `Agent` and every subsystem that accepts a `Storage` — session persistence, the context manager's stash — uses it, each under its own prefix (`session/`, `context/<session_id>/scopes/agent/<agent_id>/`). Storage passed directly to a subsystem still takes precedence. Agent-level storage is a shared backend, not a switch: session state persists only once you add a session manager, which then inherits the store.
 
-The context manager needs `strands-agents` 1.55.0 or later in Python and `@strands-agents/sdk` 1.18.0 or later in TypeScript.
+The context manager needs `strands-agents` 1.56.0 or later in Python and `@strands-agents/sdk` 1.18.0 or later in TypeScript.
 
 ```python
 from strands import Agent
@@ -143,7 +143,7 @@ agent("Remember that my favorite color is blue.")
 ```
 
 The same instance plugs into every SDK subsystem that accepts a `Storage`, such as the context
-manager's stash of message content (`strands-agents` 1.55.0 or later):
+manager's stash of message content (`strands-agents` 1.56.0 or later):
 
 ```python
 from strands import Agent
