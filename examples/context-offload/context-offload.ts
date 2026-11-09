@@ -2,7 +2,7 @@
  * Store values beyond the DynamoDB item limit with transparent S3 offload.
  *
  * Agent workloads produce oversized values routinely: a tool returns a whole
- * web page, a session accumulates a long transcript, a context offloader parks
+ * web page, a session accumulates a long transcript, the context manager stashes
  * a large intermediate result. DynamoDB items cap at 400 KB. Configuring the
  * store with an S3 bucket makes that cap invisible: values above the limit are
  * offloaded to S3 with a small pointer item remaining in the table, and

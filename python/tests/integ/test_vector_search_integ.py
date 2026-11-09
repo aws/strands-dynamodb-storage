@@ -14,14 +14,16 @@ Run:
 
 from __future__ import annotations
 
+import asyncio
 import os
 import time
 import uuid
 
 import boto3
 import pytest
+from strands.vended_memory_stores.file_memory_store import FileMemoryStore
 
-from strands_dynamodb_storage import DynamoDBStorage, SearchQuery
+from strands_dynamodb_storage import DynamoDBStorage, DynamoDBVectorSearchStrategy, SearchQuery
 
 RUN = os.environ.get("RUN_INTEG") == "1"
 REGION = os.environ.get("AWS_REGION", "us-east-1")
@@ -95,3 +97,81 @@ async def test_native_search_end_to_end(vector_table):
     # include_values round-trips the stored bytes
     [top] = await storage.search(SearchQuery(vector=[1.0, 0.0, 0.0, 0.0], top_k=1, pk="tenant/a", include_values=True))
     assert top.data == b"likes window seats"
+
+
+async def test_index_backfills_a_value_in_place(vector_table):
+    """index() adds the vector to a value written before the strategy, leaving the item's own data alone."""
+    vocabulary = ("dark", "mode", "coffee", "tea")
+
+    def embed(text: str) -> list[float]:
+        tokens = text.lower().split()
+        return [0.01 + tokens.count(word) for word in vocabulary]
+
+    plain = DynamoDBStorage(TABLE, region_name=REGION, prefix="tenant/c/", index_name=INDEX)
+    await plain.write("memory/facts/a", b"dark mode", metadata={"kind": "pref"})
+    strategy = DynamoDBVectorSearchStrategy(embedder=embed)
+    view = DynamoDBStorage(
+        TABLE, region_name=REGION, prefix="tenant/c/", index_name=INDEX, search_strategy=strategy
+    ).namespace("memory/facts")
+
+    await strategy.index(view, "a", await view.read("a"))
+
+    item = vector_table.get_item(TableName=TABLE, Key={"pk": {"S": "tenant/c"}, "sk": {"S": "memory/facts/a"}})["Item"]
+    assert [float(n["N"]) for n in item["vector"]["L"]] == embed("dark mode")
+    assert item["data"]["B"] == b"dark mode"
+    assert item["meta"]["M"] == {"kind": {"S": "pref"}}, "only the vector is written, so metadata survives"
+    # The condition rejects a second backfill: the item already carries a vector.
+    assert await view._set_vector("a", embed("coffee tea")) is False
+
+    # The index is eventually consistent: poll until the backfilled item is visible.
+    found = []
+    deadline = time.time() + 300
+    while time.time() < deadline:
+        found = await view.search("dark")
+        if found:
+            break
+        await asyncio.sleep(5)
+    assert [result.key for result in found] == ["a"]
+
+
+async def test_vector_search_strategy_end_to_end(vector_table):
+    """DynamoDBVectorSearchStrategy against the real index: FileMemoryStore recalls by meaning, best first."""
+    vocabulary = ("dark", "mode", "coffee", "tea")
+
+    def embed(text: str) -> list[float]:
+        tokens = text.lower().replace("#", " ").split()
+        return [0.01 + tokens.count(word) for word in vocabulary]
+
+    storage = DynamoDBStorage(
+        TABLE,
+        region_name=REGION,
+        prefix="tenant/b/",
+        index_name=INDEX,
+        search_strategy=DynamoDBVectorSearchStrategy(embedder=embed),
+    )
+    knowledge = FileMemoryStore(name="facts", storage=storage, writable=True)  # type: ignore[abstract]
+    await knowledge.add("# Display\nprefers dark mode")
+    await knowledge.add("# Drinks\nlikes coffee and tea")
+
+    # The index is eventually consistent: poll until both items are visible.
+    found = []
+    deadline = time.time() + 300
+    while time.time() < deadline:
+        found = await knowledge.search("dark")
+        if len(found) == 2:
+            break
+        await asyncio.sleep(5)
+    assert [entry.content.splitlines()[0] for entry in found] == ["# Display", "# Drinks"]
+
+    raw = await storage.namespace("memory/facts").search("dark")
+    assert raw[0].score > raw[1].score, "converted COSINE scores rank the closest value first"
+    assert all(0 < result.score <= 1 for result in raw)
+
+    await storage.namespace("memory/facts").delete(raw[0].key)
+    deadline = time.time() + 300
+    while time.time() < deadline:
+        remaining = [result.key for result in await storage.namespace("memory/facts").search("dark")]
+        if raw[0].key not in remaining:
+            break
+        await asyncio.sleep(5)
+    assert raw[0].key not in remaining

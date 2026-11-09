@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import logging
 import math
 from unittest import mock
@@ -17,6 +18,11 @@ from strands.memory import MemoryManager
 from strands.types.exceptions import StorageError
 
 from strands_dynamodb_storage import BedrockEmbedder, DynamoDBMemoryStore, DynamoDBStorage, Embedder
+
+# Keyword search, the fallback for a plain-string search, ships in strands-agents 1.54.0.
+needs_keyword_search = pytest.mark.skipif(
+    importlib.util.find_spec("strands.storage.search") is None, reason="needs strands-agents>=1.54.0"
+)
 
 REGION = "us-east-1"
 TABLE = "memory-table"
@@ -756,6 +762,70 @@ async def test_accepts_an_async_embed_function_and_an_async_callable(ddb):
         assert (await store.search("window"))[0].content == "Prefers a window seat"
 
 
+async def test_calls_an_embed_method_that_takes_only_the_text_without_a_purpose(ddb):
+    class TextOnly:
+        def __init__(self):
+            self.calls = []
+
+        async def embed(self, text):
+            self.calls.append(text)
+            return [1.0, 0.0] if "window" in text else [0.0, 1.0]
+
+    embedder = TextOnly()
+    store = make_store(ddb, embedder=embedder)
+    await store.add("Prefers a window seat")
+    await store.add("Has a peanut allergy")
+    assert (await store.search("window"))[0].content == "Prefers a window seat"
+    assert embedder.calls == ["Prefers a window seat", "Has a peanut allergy", "window"]
+
+
+async def test_passes_the_purpose_to_an_embed_method_with_an_optional_purpose_or_varargs(ddb):
+    calls = []
+
+    class OptionalPurpose:
+        def embed(self, text, purpose="document"):
+            calls.append(purpose)
+            return [1.0, 0.0]
+
+    class VarArgs:
+        def embed(self, *args):
+            calls.append(args[1])
+            return [1.0, 0.0]
+
+    for embedder in (OptionalPurpose(), VarArgs()):
+        await make_store(ddb, embedder=embedder).search("window")
+    assert calls == ["query", "query"]
+
+
+async def test_an_optional_second_parameter_gets_the_purpose_whatever_its_name(ddb):
+    calls = []
+
+    class WithInputType:
+        async def embed(self, text, input_type="search_document"):
+            calls.append((text, input_type))
+            return [1.0, 0.0]
+
+    store = make_store(ddb, embedder=WithInputType())
+    await store.add("Prefers a window seat")
+    await store.search("window")
+    assert calls == [("Prefers a window seat", "document"), ("window", "query")]
+
+
+async def test_accepts_a_strands_sdk_embedder(ddb):
+    search = pytest.importorskip("strands.storage.search")
+    if not hasattr(search, "Embedder"):
+        pytest.skip("this strands-agents release has no Embedder")
+
+    class SdkEmbedder(search.Embedder):
+        async def embed(self, text: str) -> list[float]:
+            return [1.0, 0.0] if "window" in text else [0.0, 1.0]
+
+    store = make_store(ddb, embedder=SdkEmbedder())
+    await store.add("Prefers a window seat")
+    await store.add("Has a peanut allergy")
+    assert (await store.search("window"))[0].content == "Prefers a window seat"
+
+
 def test_keyword_embedder_satisfies_the_embedder_protocol():
     assert isinstance(KeywordEmbedder(), Embedder)
     assert isinstance(BedrockEmbedder(), Embedder)
@@ -953,18 +1023,22 @@ def test_requires_a_dynamodb_storage():
 # ------------------------------------------------------------------- DynamoDBStorage text queries and partition keys
 
 
-async def test_storage_rejects_a_plain_string_search_and_points_at_the_memory_store(ddb):
+@needs_keyword_search
+async def test_storage_answers_a_plain_string_search_with_keyword_search(ddb):
     storage = make_storage(ddb)
-    for target in (storage, storage.namespace("user/u1")):
-        with pytest.raises(StorageError, match="or use DynamoDBMemoryStore, which embeds text for you.$"):
-            await target.search("window")
+    with pytest.raises(StorageError, match="too broad"):
+        await storage.search("window")
+    view = storage.namespace("user/u1")
+    await view.write("notes/seat", b"Prefers a window seat")
+    assert [result.key for result in await view.search("window")] == ["notes/seat"]
 
 
-async def test_storage_rejects_a_plain_string_search_through_an_sdk_memory_store(ddb):
+async def test_sdk_memory_store_searches_the_storage_by_keyword(ddb):
     file_memory_store = pytest.importorskip("strands.vended_memory_stores.file_memory_store")
     store = file_memory_store.FileMemoryStore(name="notes", storage=make_storage(ddb))
-    with pytest.raises(StorageError, match="DynamoDBMemoryStore"):
-        await store.search("window")
+    await store.add("Seating\nPrefers a window seat")
+    [entry] = await store.search("window")
+    assert "Prefers a window seat" in entry.content
 
 
 def test_storage_reports_the_partition_a_key_is_stored_under(ddb):

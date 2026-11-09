@@ -22,15 +22,18 @@ storage = DynamoDBStorage("agent-data", region_name="us-east-1")
 agent = Agent(session_manager=SnapshotSessionManager(storage=storage))
 ```
 
-The same instance backs any subsystem that accepts a `Storage`, for example offloading oversized
-tool results with the context offloader:
+The same instance backs any subsystem that accepts a `Storage`, for example the context manager's
+stash (`strands-agents` 1.55.0 or later):
 
 ```python
 from strands import Agent
-from strands.vended_plugins.context_offloader import ContextOffloader
 
-agent = Agent(plugins=[ContextOffloader(storage=storage)])
+agent = Agent(storage=storage, context_manager="auto")
 ```
+
+The stash writes each message's content under `context/<session_id>/` in the agent's `storage` and
+registers a `retrieve_context` tool to read originals back. A session manager deletes it with the
+session; without one, each run gets a new session ID, so set `ttl_seconds` to expire old stashes.
 
 Direct byte usage (async):
 
@@ -58,6 +61,8 @@ await store.delete("sessions/s1/snapshot.json")
   requires boto3 >= 1.43.64); a `vector_search` adapter can override the call.
 - `DynamoDBMemoryStore`, a Strands `MemoryStore` for the Memory Manager, with
   `BedrockEmbedder` (Amazon Titan Text Embeddings V2, Cohere Embed v3 and v4).
+- `DynamoDBVectorSearchStrategy`, a Strands `SearchStrategy` over the same vector index, for text
+  search through `DynamoDBStorage` (such as the SDK's `FileMemoryStore`).
 
 ## Long-term memory
 
@@ -128,9 +133,10 @@ from strands_dynamodb_storage import BedrockEmbedder
 # queries with separate input types.
 memory = DynamoDBMemoryStore(storage, embedder=BedrockEmbedder("us.cohere.embed-v4:0", dimensions=1024))
 
-# Any other model: a function from text to a list of floats (sync or async), or an object
-# with an `embed(self, text, purpose)` method (sync or async) where purpose is "document" or
-# "query".
+# Any other model: a function from text to a list of floats (sync or async), an object with an
+# `embed(self, text, purpose)` method (sync or async) where purpose is "document" or "query", or
+# a Strands SDK `strands.storage.search.Embedder` (strands-agents 1.64.0 or later), whose
+# `embed(text)` takes only the text.
 memory = DynamoDBMemoryStore(storage, embedder=lambda text: my_model.encode(text).tolist())
 ```
 
@@ -190,8 +196,44 @@ for r in results:
 # (COSINE/EUCLIDEAN: lower = nearer; DOT_PRODUCT: higher = more similar)
 ```
 
-`search()` takes a `SearchQuery` only; a plain-string query raises `StorageError`, because the
-storage does not embed text. Like a global secondary index, the vector index is eventually
+A plain-string `search()` does not embed the text. It goes to the `search_strategy` passed to the
+constructor, which also indexes every write and is shared with `namespace()` views. Without one,
+it uses the SDK's `KeywordSearchStrategy` (`strands-agents` 1.54.0 or later), which lists every key
+and so works on a namespace at least two segments deep, such as `store.namespace("user/u1")`; on a
+broader storage the listing is rejected as too broad. Keyword scores rank higher as more relevant,
+unlike vector scores.
+
+```python
+from strands.storage.search import KeywordSearchStrategy
+
+store = DynamoDBStorage("agent-data", search_strategy=KeywordSearchStrategy())
+```
+
+### Vector search strategy
+
+`DynamoDBVectorSearchStrategy` is the DynamoDB counterpart of the SDK's `S3VectorSearchStrategy`:
+search by meaning over the table's vector index, for anything that searches through a `Storage`.
+Each `write` embeds the value and stores its vector on the same item, in the same request; a
+plain-string `search` embeds the query and returns results best first, with higher scores closer.
+Its embedder is any SDK `Embedder` (`strands-agents` 1.64.0 or later), `BedrockEmbedder` (the
+default, which is itself an SDK `Embedder`), or a function from text to vector.
+
+```python
+from strands.vended_memory_stores.file_memory_store import FileMemoryStore
+from strands_dynamodb_storage import DynamoDBStorage, DynamoDBVectorSearchStrategy
+
+storage = DynamoDBStorage("agent-memory", search_strategy=DynamoDBVectorSearchStrategy())
+knowledge = FileMemoryStore(name="facts", storage=storage)
+```
+
+Every write through the storage is embedded, so give the strategy a storage of its own rather than
+the agent's. Searches are pinned to one partition, so use it on a storage namespaced at least two
+segments deep, as `FileMemoryStore`'s `memory/<name>` is. Each value is embedded whole and must fit
+the embedding model's input; if embedding fails, `write` raises and stores nothing. Values written
+before the strategy was configured have no vector until rewritten, or passed to `index()`. Pass
+`distance_function` when the index doesn't use `COSINE`.
+
+Like a global secondary index, the vector index is eventually
 consistent, and a freshly created index backfills before it is searchable. Requires `boto3 >= 1.43.64`; a
 `vector_search` adapter, when configured, overrides the native call (testing, custom routing).
 
