@@ -23,7 +23,7 @@ agent = Agent(session_manager=SnapshotSessionManager(storage=storage))
 ```
 
 The same instance backs any subsystem that accepts a `Storage`, for example the context manager's
-stash (`strands-agents` 1.55.0 or later):
+stash (`strands-agents` 1.56.0 or later):
 
 ```python
 from strands import Agent
@@ -216,7 +216,8 @@ search by meaning over the table's vector index, for anything that searches thro
 Each `write` embeds the value and stores its vector on the same item, in the same request; a
 plain-string `search` embeds the query and returns results best first, with higher scores closer.
 Its embedder is any SDK `Embedder` (`strands-agents` 1.64.0 or later), `BedrockEmbedder` (the
-default, which is itself an SDK `Embedder`), or a function from text to vector.
+default, which is itself an SDK `Embedder`), or a function from text to vector. The strategy needs
+`strands-agents` 1.54.0 or later.
 
 ```python
 from strands.vended_memory_stores.file_memory_store import FileMemoryStore
