@@ -8,7 +8,8 @@ name: Release Please
 # tags, which wait for approval in the pypi and npm environments.
 #
 # Pull requests, pushes and releases made with GITHUB_TOKEN start no workflow
-# runs, apart from workflow_dispatch. So this workflow starts the runs itself:
+# runs. Of the events GITHUB_TOKEN causes, only workflow_dispatch and
+# repository_dispatch start runs. So this workflow dispatches the runs itself:
 # the CI and code scanning checks on the release branch, which include the
 # checks main requires, and the publish workflows on the new tags.
 on:
