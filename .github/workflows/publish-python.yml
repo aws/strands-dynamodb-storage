@@ -1,13 +1,16 @@
 name: Publish Python to PyPI
 
-# Triggered when a GitHub Release is published with a tag prefixed `python-v`
-# (e.g. `python-v0.1.0`). The published version is whatever is currently in
-# python/pyproject.toml ([project].version) — bump it before tagging, the same
-# way the TypeScript side bumps package.json.
+# Publishes the version in python/pyproject.toml ([project].version) for a
+# `python-v*` tag (e.g. `python-v0.1.0`). Two triggers start it:
+# - a GitHub Release published by a person, which sends the release event;
+# - release-please.yml, which runs this with workflow_dispatch on the tag after
+#   its release pull request merges. Releases it creates with GITHUB_TOKEN send
+#   no release event. That pull request sets the version in both packages.
 on:
   release:
     types:
       - published
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -21,9 +24,11 @@ jobs:
     steps:
       - id: check
         env:
-          TAG_NAME: ${{ github.event.release.tag_name }}
+          # A release event carries its tag; a workflow_dispatch run must be on the tag.
+          TAG_NAME: ${{ github.event.release.tag_name || github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
         run: |
-          if [[ "$TAG_NAME" == python-v* ]]; then
+          if [[ "$REF_TYPE" == tag && "$TAG_NAME" == python-v* ]]; then
             echo "should_publish=true" >> "$GITHUB_OUTPUT"
           else
             echo "should_publish=false" >> "$GITHUB_OUTPUT"

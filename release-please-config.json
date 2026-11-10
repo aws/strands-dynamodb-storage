@@ -1,0 +1,42 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "include-component-in-tag": true,
+  "include-v-in-tag": true,
+  "tag-separator": "-",
+  "separate-pull-requests": false,
+  "bump-minor-pre-major": true,
+  "changelog-sections": [
+    { "type": "feat", "section": "Features" },
+    { "type": "feature", "section": "Features" },
+    { "type": "fix", "section": "Bug Fixes" },
+    { "type": "perf", "section": "Performance Improvements" },
+    { "type": "revert", "section": "Reverts" },
+    { "type": "docs", "section": "Documentation", "hidden": true },
+    { "type": "style", "section": "Styles", "hidden": true },
+    { "type": "chore", "section": "Miscellaneous Chores", "hidden": true },
+    { "type": "refactor", "section": "Code Refactoring", "hidden": true },
+    { "type": "test", "section": "Tests", "hidden": true },
+    { "type": "build", "section": "Build System", "hidden": true },
+    { "type": "ci", "section": "Continuous Integration", "hidden": true },
+    { "type": "deps", "section": "Dependencies", "hidden": true }
+  ],
+  "packages": {
+    "python": {
+      "release-type": "python",
+      "component": "python",
+      "package-name": "strands-dynamodb-storage"
+    },
+    "typescript": {
+      "release-type": "node",
+      "component": "typescript",
+      "package-name": "strands-dynamodb-storage"
+    }
+  },
+  "plugins": [
+    {
+      "type": "linked-versions",
+      "groupName": "strands-dynamodb-storage",
+      "components": ["python", "typescript"]
+    }
+  ]
+}

@@ -11,6 +11,8 @@ on:
     paths:
       - 'typescript/**'
       - '.github/workflows/ci-typescript.yml'
+  # release-please.yml starts this on the release branch, whose pushes start no runs.
+  workflow_dispatch:
 
 permissions:
   contents: read
