@@ -5,10 +5,8 @@
 
 from __future__ import annotations
 
-import asyncio
 import builtins
 import hashlib
-import inspect
 import logging
 import math
 from typing import TYPE_CHECKING, Any, Optional, Union
@@ -17,7 +15,16 @@ from strands.memory import MemoryEntry, MemoryStore, SearchOptions
 from strands.types.exceptions import StorageError
 
 from .dynamodb_storage import _MAX_TOP_K, DynamoDBStorage, SearchQuery
-from .embedders import BedrockEmbedder, Embedder, EmbeddingPurpose, EmbedFunction, _is_finite_number
+from .embedders import (
+    BedrockEmbedder,
+    Embedder,
+    EmbeddingPurpose,
+    EmbedFunction,
+    _as_vector,
+    _call_embedder,
+    _takes_purpose,
+    _TextEmbedder,
+)
 
 if TYPE_CHECKING:
     from strands.memory import ExtractionConfig
@@ -66,7 +73,7 @@ class DynamoDBMemoryStore(MemoryStore):
         self,
         storage: DynamoDBStorage,
         *,
-        embedder: Union[Embedder, EmbedFunction, None] = None,
+        embedder: Union[Embedder, _TextEmbedder, EmbedFunction, None] = None,
         name: str = "dynamodb",
         description: Optional[str] = "Long-term memories stored in Amazon DynamoDB, searched by meaning",
         max_search_results: Optional[int] = None,
@@ -78,10 +85,12 @@ class DynamoDBMemoryStore(MemoryStore):
         Args:
             storage: The ``DynamoDBStorage`` (usually a namespaced view) to keep memories in.
                 Its table needs the vector index described in the package README.
-            embedder: An :class:`Embedder` such as :class:`BedrockEmbedder`, or a plain
-                function from text to vector. Defaults to ``BedrockEmbedder()`` (Amazon
-                Titan Text Embeddings V2, 1024 dimensions) in the storage's Region, with
-                its ``boto_session`` and ``boto_client_config``.
+            embedder: An :class:`Embedder` such as :class:`BedrockEmbedder`, an object whose
+                ``embed`` takes only the text (such as a Strands SDK
+                ``strands.storage.search.Embedder``), or a plain function from text to
+                vector. Defaults to ``BedrockEmbedder()`` (Amazon Titan Text Embeddings V2,
+                1024 dimensions) in the storage's Region, with its ``boto_session`` and
+                ``boto_client_config``.
             name: Store name, unique within a ``MemoryManager``; also the key segment
                 ``memory/<name>/``. Must not be ``.`` or ``..`` or contain ``/``, control
                 characters, lone surrogates, or leading or trailing whitespace.
@@ -141,6 +150,7 @@ class DynamoDBMemoryStore(MemoryStore):
             region, session, client_config = storage._aws_defaults()
             embedder = BedrockEmbedder(region_name=region, boto_session=session, boto_client_config=client_config)
         self._embedder = embedder
+        self._embed_takes_purpose = _takes_purpose(getattr(embedder, "embed", None))
 
     async def search(self, query: str, options: Optional[SearchOptions] = None) -> builtins.list[MemoryEntry]:
         """Return the stored memories closest in meaning to ``query``, closest first.
@@ -228,26 +238,20 @@ class DynamoDBMemoryStore(MemoryStore):
         return min(requested, _MAX_TOP_K)
 
     async def _embed(self, text: str, purpose: EmbeddingPurpose) -> builtins.list[float]:
-        embedder = self._embedder
         try:
-            # getattr, not isinstance(embedder, Embedder): from Python 3.12 the Protocol check
-            # skips attributes resolved by __getattr__ (as on unittest.mock objects).
-            embed = getattr(embedder, "embed", None)
-            if callable(embed):
-                result: Any = await _call(embed, text, purpose)
-            else:
-                result = await _call(embedder, text)
+            result = await _call_embedder(self._embedder, text, purpose, takes_purpose=self._embed_takes_purpose)
         except StorageError:
             raise
         except Exception as error:
             raise StorageError(
                 f"Embedding failed in memory store '{self.name}': {type(error).__name__}: {error}"
             ) from error
-        if not isinstance(result, (list, tuple)) or len(result) == 0 or not all(_is_finite_number(v) for v in result):
+        vector = _as_vector(result)
+        if vector is None:
             raise StorageError(
                 f"The embedder for memory store '{self.name}' must return a non-empty list of finite numbers"
             )
-        return [float(v) for v in result]
+        return vector
 
     def _storable_metadata(self, metadata: Any) -> Optional[dict[str, Union[str, int, float, bool]]]:
         """Keep the metadata entries the storage can store; drop the rest with a warning."""
@@ -342,16 +346,6 @@ def _is_dynamodb_number(value: Union[int, float]) -> bool:
     if isinstance(value, float) and not math.isfinite(value):
         return False
     return value == 0 or 1e-130 <= abs(value) <= _MAX_SAFE_INTEGER
-
-
-async def _call(function: Any, *args: Any) -> Any:
-    """Await ``function(*args)``; a sync callable (for example a boto3 call) runs in a worker thread."""
-    if inspect.iscoroutinefunction(function):
-        return await function(*args)
-    result = await asyncio.to_thread(function, *args)
-    if inspect.isawaitable(result):
-        result = await result
-    return result
 
 
 def _check_limit(value: Any, label: str) -> None:

@@ -3,7 +3,7 @@
 An **Amazon DynamoDB `Storage` backend** for the [Strands Agents](https://github.com/strands-agents/harness-sdk) TypeScript SDK.
 
 It implements the SDK's unified byte `Storage` interface (`write` / `read` / `delete` / `list` / `namespace`), so one
-DynamoDB-backed instance can be passed to **Session Manager, Memory Manager**, the context offloader, transcripts, and
+DynamoDB-backed instance can be passed to **Session Manager, Memory Manager**, the context manager's stash, transcripts, and
 any other subsystem that persists bytes — no per-subsystem code. On top of the byte contract it adds S3 offload for large
 values, optional gzip compression, TTL, and optional **native vector search**.
 
@@ -47,15 +47,18 @@ const agent = new Agent({ sessionManager: new SessionManager({ storage }) })
 // sessions now persist to DynamoDB — nothing else to wire.
 ```
 
-The same instance backs any subsystem that accepts a `Storage` — for example, offloading oversized
-tool results with the context offloader:
+The same instance backs any subsystem that accepts a `Storage` — for example, the context manager's
+stash (`@strands-agents/sdk` 1.18.0 or later):
 
 ```ts
 import { Agent } from '@strands-agents/sdk'
-import { ContextOffloader } from '@strands-agents/sdk/vended-plugins/context-offloader'
 
-const agent = new Agent({ plugins: [new ContextOffloader({ storage })] })
+const agent = new Agent({ storage, contextManager: 'auto' })
 ```
+
+The stash writes each message's content under `context/<sessionId>/` in the agent's `storage` and
+registers a `retrieve_context` tool to read originals back. A session manager deletes it with the
+session; without one, each run gets a new session ID, so set `ttlSeconds` to expire old stashes.
 
 ## Direct byte usage
 
@@ -194,8 +197,9 @@ const cohere = new DynamoDBMemoryStore(storage, {
   embedder: new BedrockEmbedder({ modelId: 'us.cohere.embed-v4:0', dimensions: 1024 }),
 })
 
-// Any other model: a function from text to an array of numbers (sync or async), or an object
-// with an `embed(text, purpose)` method (sync or async) where purpose is 'document' or 'query'.
+// Any other model: a function from text to an array of numbers (sync or async), an object with an
+// `embed(text, purpose)` method (sync or async) where purpose is 'document' or 'query', or a Strands SDK
+// `Embedder` from '@strands-agents/sdk/storage/search' (1.23.0 or later), whose `embed(text)` takes only the text.
 // Convert a Float32Array with Array.from.
 const custom = new DynamoDBMemoryStore(storage, { embedder: async (text) => Array.from(await myModel.embed(text)) })
 ```
@@ -214,7 +218,11 @@ accepts up to about 128,000 tokens per text.
 `search()` is the lower-level API under the memory store: write each item with its embedding, then query by vector.
 It is an optional, feature-detected part of the `Storage` contract (`if (storage.search) { … }`). The storage searches
 pre-computed embedding vectors and does not embed text: pass a `SearchQuery` with a `vector`, as every example does. A
-plain-string query is rejected with a `StorageError` at runtime; for text search, use `DynamoDBMemoryStore`.
+plain-string query goes to the `searchStrategy` in the config, which also indexes every write and is shared with
+`namespace()` views. Without one, it uses the SDK's `KeywordSearchStrategy` (`@strands-agents/sdk` 1.14.0 or later),
+which lists every key and so works on a namespace at least two segments deep, such as `storage.namespace('user/u1')`; on
+a broader storage the listing is rejected as too broad. Keyword scores rank higher as more relevant, unlike vector
+scores. For search by meaning, use `DynamoDBMemoryStore` or the [vector search strategy](#vector-search-strategy).
 On DynamoDB the search runs against the **native vector
 index**, so nearest-neighbour scoring happens _in the database_ -- no second vector store, no ETL -- and because the index
 is partitioned on `pk`, every search is scoped to the caller's key space. Creating the table with a vector index (and the
@@ -250,6 +258,31 @@ const results = await store.search({
 // (COSINE/EUCLIDEAN: lower = nearer; DOT_PRODUCT: higher = more similar).
 ```
 
+### Vector search strategy
+
+`DynamoDBVectorSearchStrategy` is the DynamoDB counterpart of the SDK's `S3VectorSearchStrategy`: search by meaning
+over the table's vector index, for anything that searches through a `Storage`. Each `write` embeds the value and stores
+its vector on the same item, in the same request; a plain-string `search` embeds the query and returns results best
+first, with higher scores closer. Its embedder is any SDK `Embedder` (`@strands-agents/sdk` 1.23.0 or later),
+`BedrockEmbedder` (the default, which also fits the SDK's `Embedder`), or a function from text to vector.
+
+```ts
+import { FileMemoryStore } from '@strands-agents/sdk/vended-memory-stores/file-memory-store'
+import { DynamoDBStorage, DynamoDBVectorSearchStrategy } from 'strands-dynamodb-storage'
+
+const storage = new DynamoDBStorage('agent-memory', { searchStrategy: new DynamoDBVectorSearchStrategy() })
+const knowledge = new FileMemoryStore({ name: 'facts', storage })
+```
+
+`FileMemoryStore` recalls through the storage's search on `@strands-agents/sdk` 1.22.0 or later. Releases 1.16.0 to
+1.21.0 ignore it and scan by keyword.
+
+Every write through the storage is embedded, so give the strategy a storage of its own rather than the agent's.
+Searches are pinned to one partition, so use it on a storage namespaced at least two segments deep, as
+`FileMemoryStore`'s `memory/<name>` is. Each value is embedded whole and must fit the embedding model's input; if
+embedding fails, `write` throws and stores nothing. Values written before the strategy was configured have no vector
+until rewritten, or passed to `index()`. Pass `distanceFunction` when the index doesn't use `COSINE`.
+
 ### The `vectorSearch` adapter (optional override)
 
 `search()` issues DynamoDB `SearchVectors` natively (requires `@aws-sdk/client-dynamodb` >= 3.1103.0).
@@ -272,15 +305,16 @@ The adapter is purely an override: with none configured, `search()` issues the n
 
 ## Configuration reference
 
-| Option                               | Purpose                                                                  |
-| ------------------------------------ | ------------------------------------------------------------------------ |
-| `region` / `client`                  | AWS region, or a pre-built `DynamoDBDocumentClient` (mutually exclusive) |
-| `prefix`                             | Key prefix prepended to every key (a namespace within the table)         |
-| `s3Bucket` / `s3Prefix` / `s3Client` | S3 offload target for large values                                       |
-| `compression`                        | `'gzip'` \| `'none'` (default `'none'`)                                  |
-| `ttlSeconds` / `ttlAttribute`        | TTL duration + attribute name (default `expireAt`)                       |
-| `indexName` / `vectorAttribute`      | Vector index + embedding attribute (default `vector_index` / `vector`)   |
-| `vectorSearch`                       | Adapter that performs the native vector search                           |
+| Option                               | Purpose                                                                      |
+| ------------------------------------ | ---------------------------------------------------------------------------- |
+| `region` / `client`                  | AWS region, or a pre-built `DynamoDBDocumentClient` (mutually exclusive)     |
+| `prefix`                             | Key prefix prepended to every key (a namespace within the table)             |
+| `s3Bucket` / `s3Prefix` / `s3Client` | S3 offload target for large values                                           |
+| `compression`                        | `'gzip'` \| `'none'` (default `'none'`)                                      |
+| `ttlSeconds` / `ttlAttribute`        | TTL duration + attribute name (default `expireAt`)                           |
+| `indexName` / `vectorAttribute`      | Vector index + embedding attribute (default `vector_index` / `vector`)       |
+| `vectorSearch`                       | Adapter that performs the native vector search                               |
+| `searchStrategy`                     | Strategy for plain-string `search()`, such as `DynamoDBVectorSearchStrategy` |
 
 ## Minimal IAM
 

@@ -29,10 +29,13 @@ export { DynamoDBStorage } from './dynamodb-storage.js'
 export type {
   DynamoDBStorageConfig,
   DynamoDBListQuery,
+  DynamoDBSearchStrategy,
   SearchQuery,
   SearchResult,
   VectorSearchAdapter,
 } from './dynamodb-storage.js'
+export { DynamoDBVectorSearchStrategy } from './vector-search.js'
+export type { DistanceFunction, DynamoDBVectorSearchStrategyConfig } from './vector-search.js'
 export { DynamoDBMemoryStore } from './memory-store.js'
 export type { DynamoDBMemoryStoreConfig } from './memory-store.js'
 export { BedrockEmbedder, DEFAULT_EMBEDDING_MODEL_ID } from './embedders.js'

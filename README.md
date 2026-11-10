@@ -37,7 +37,7 @@
   </p>
 </div>
 
-Strands DynamoDB Storage is an [Amazon DynamoDB](https://aws.amazon.com/dynamodb/) backend for the [Strands Agents](https://github.com/strands-agents/harness-sdk) SDK `Storage` interface. It implements the SDK's unified byte contract (`write` / `read` / `delete` / `list` / `namespace`), so a single DynamoDB-backed instance serves Session Manager, Memory Manager, the context offloader, transcripts, and any other subsystem that persists bytes. No per-subsystem code, and your agent's state lives in your own AWS account, next to your operational data.
+Strands DynamoDB Storage is an [Amazon DynamoDB](https://aws.amazon.com/dynamodb/) backend for the [Strands Agents](https://github.com/strands-agents/harness-sdk) SDK `Storage` interface. It implements the SDK's unified byte contract (`write` / `read` / `delete` / `list` / `namespace`), so a single DynamoDB-backed instance serves Session Manager, Memory Manager, the context manager's stash, transcripts, and any other subsystem that persists bytes. No per-subsystem code, and your agent's state lives in your own AWS account, next to your operational data.
 
 This repository ships the backend for **both TypeScript and Python**:
 
@@ -64,12 +64,13 @@ Create a table with a string partition key `pk` and a string sort key `sk`, then
 
 ### One store for the whole agent
 
-Set `storage` once on the `Agent` and every subsystem that accepts a `Storage` — session persistence, the context offloader — uses it, each namespaced under its own prefix (`session/`, `offloader/`). Storage passed directly to a subsystem still takes precedence. Agent-level storage is a shared backend, not a switch: session state persists only once you add a session manager, which then inherits the store.
+Set `storage` once on the `Agent` and every subsystem that accepts a `Storage` — session persistence, the context manager's stash — uses it, each under its own prefix (`session/`, `context/<session_id>/scopes/agent/<agent_id>/`). Storage passed directly to a subsystem still takes precedence. Agent-level storage is a shared backend, not a switch: session state persists only once you add a session manager, which then inherits the store.
+
+The context manager needs `strands-agents` 1.56.0 or later in Python and `@strands-agents/sdk` 1.18.0 or later in TypeScript.
 
 ```python
 from strands import Agent
 from strands.session import SnapshotSessionManager
-from strands.vended_plugins.context_offloader import ContextOffloader
 from strands_dynamodb_storage import DynamoDBStorage
 
 storage = DynamoDBStorage("agent-storage", region_name="us-east-1")
@@ -78,13 +79,12 @@ storage = DynamoDBStorage("agent-storage", region_name="us-east-1")
 agent = Agent(
     storage=storage,
     session_manager=SnapshotSessionManager(),  # persists under session/
-    plugins=[ContextOffloader()],              # offloads oversized tool results under offloader/
+    context_manager="auto",  # stashes message content under context/
 )
 ```
 
 ```typescript
 import { Agent, SessionManager } from '@strands-agents/sdk'
-import { ContextOffloader } from '@strands-agents/sdk/vended-plugins/context-offloader'
 import { DynamoDBStorage } from 'strands-dynamodb-storage'
 
 const storage = new DynamoDBStorage('agent-storage', { region: 'us-east-1' })
@@ -92,8 +92,8 @@ const storage = new DynamoDBStorage('agent-storage', { region: 'us-east-1' })
 // One backend for the whole agent — subsystems without their own storage inherit it.
 const agent = new Agent({
   storage,
-  sessionManager: new SessionManager({}),   // persists under session/
-  plugins: [new ContextOffloader({})],      // offloads oversized tool results under offloader/
+  sessionManager: new SessionManager({}), // persists under session/
+  contextManager: 'auto', // stashes message content under context/
 })
 ```
 
@@ -142,14 +142,13 @@ agent = Agent(session_manager=SnapshotSessionManager("s1", storage=storage))
 agent("Remember that my favorite color is blue.")
 ```
 
-The same instance plugs into every SDK subsystem that accepts a `Storage`. Offload oversized tool
-results to DynamoDB via the context offloader:
+The same instance plugs into every SDK subsystem that accepts a `Storage`, such as the context
+manager's stash of message content (`strands-agents` 1.56.0 or later):
 
 ```python
 from strands import Agent
-from strands.vended_plugins.context_offloader import ContextOffloader
 
-agent = Agent(plugins=[ContextOffloader(storage=storage)])
+agent = Agent(storage=storage, context_manager="auto")
 ```
 
 Or use the byte contract directly:
@@ -181,14 +180,13 @@ const agent = new Agent({ sessionManager: new SessionManager({ sessionId: 's1', 
 await agent.invoke('Remember that my favorite color is blue.')
 ```
 
-The same instance plugs into every SDK subsystem that accepts a `Storage`. Offload oversized tool
-results to DynamoDB via the context offloader:
+The same instance plugs into every SDK subsystem that accepts a `Storage`, such as the context
+manager's stash of message content (`@strands-agents/sdk` 1.18.0 or later):
 
 ```typescript
 import { Agent } from '@strands-agents/sdk'
-import { ContextOffloader } from '@strands-agents/sdk/vended-plugins/context-offloader'
 
-const agent = new Agent({ plugins: [new ContextOffloader({ storage })] })
+const agent = new Agent({ storage, contextManager: 'auto' })
 ```
 
 Or use the byte contract directly:
@@ -286,7 +284,7 @@ The `SearchSchema` HASH element on `pk` partitions the index the same way the ta
 }
 ```
 
-Drop the optional statements for features you don't use. `DynamoDBMemoryStore` needs both `SemanticSearchOptional` and `MemoryStoreEmbeddingsOptional`; with another embedding model, name that model instead. A geographic cross-Region inference profile such as `us.cohere.embed-v4:0` needs the profile and the model in each Region it routes to, as the [Bedrock inference profile prerequisites](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-prereq.html) describe. A global profile such as `global.cohere.embed-v4:0` also needs the model ARN without a Region (`arn:aws:bedrock:::foundation-model/cohere.embed-v4:0`), as [global cross-Region inference](https://docs.aws.amazon.com/bedrock/latest/userguide/global-cross-region-inference.html) describes. Nothing else is required: no `DescribeTable`, no `Scan`, no table-level wildcards, and credentials resolve through the standard SDK chain (environment, instance profile, or an injected client).
+Drop the optional statements for features you don't use. `DynamoDBMemoryStore` and `DynamoDBVectorSearchStrategy` need both `SemanticSearchOptional` and `MemoryStoreEmbeddingsOptional`; with another embedding model, name that model instead. A geographic cross-Region inference profile such as `us.cohere.embed-v4:0` needs the profile and the model in each Region it routes to, as the [Bedrock inference profile prerequisites](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-prereq.html) describe. A global profile such as `global.cohere.embed-v4:0` also needs the model ARN without a Region (`arn:aws:bedrock:::foundation-model/cohere.embed-v4:0`), as [global cross-Region inference](https://docs.aws.amazon.com/bedrock/latest/userguide/global-cross-region-inference.html) describes. Nothing else is required: no `DescribeTable`, no `Scan`, no table-level wildcards, and credentials resolve through the standard SDK chain (environment, instance profile, or an injected client).
 
 ## Features
 
@@ -296,7 +294,7 @@ Both languages ship the same capabilities with identical semantics.
 - **S3 offload for large values.** Values above the DynamoDB item-size limit are transparently offloaded to [Amazon S3](https://aws.amazon.com/s3/) (opt-in `s3Bucket`), with a small pointer item remaining in DynamoDB. Callers see one byte contract regardless of size.
 - **Optional gzip compression.** Applied before the offload size check, so compressible values stay inline at lower cost. Each item records whether it was compressed, so reads are correct regardless of the setting.
 - **Optional TTL.** Writes stamp a DynamoDB-native epoch-seconds attribute, and `read` / `list` / `search` also filter already-expired items, covering the window before DynamoDB physically deletes them.
-- **Vector search.** `search()` calls DynamoDB `SearchVectors` natively against a vector index on the table, with the search condition pinned to the caller's partition, bounded `TopK`, and results in most-similar-first order. Consumers feature-detect (`if (storage.search)`) and fall back to client-side KNN when absent. The storage searches pre-computed embedding vectors and does not embed text; a plain-string query is rejected with an error that points at `DynamoDBMemoryStore`. Like a global secondary index, the vector index is eventually consistent.
+- **Vector search.** `search()` calls DynamoDB `SearchVectors` natively against a vector index on the table, with the search condition pinned to the caller's partition, bounded `TopK`, and results in most-similar-first order. Consumers feature-detect (`if (storage.search)`) and fall back to client-side KNN when absent. The storage searches pre-computed embedding vectors and does not embed text. A plain-string query goes to an optional `search_strategy` / `searchStrategy` (which also indexes each write), or without one to the SDK's keyword search, which works on a namespace at least two key segments deep. For search by meaning, pass `DynamoDBVectorSearchStrategy`, the SDK `SearchStrategy` over the same index (its embedder is any SDK `Embedder`, `BedrockEmbedder` by default), or use `DynamoDBMemoryStore`. Like a global secondary index, the vector index is eventually consistent.
 - **Long-term memory store.** `DynamoDBMemoryStore` implements the SDK's `MemoryStore` for the Memory Manager: one Bedrock embedding call and one `PutItem` per memory, one embedding call and one `SearchVectors` per search, with inline memories read from the index projection rather than the base table. `BedrockEmbedder` supports Amazon Titan Text Embeddings V2 and Cohere Embed v3 and v4; any other model plugs in as an embed function.
 - **Multi-tenant prefixes.** A constructor-bound prefix namespaces every key, enforced on both structured and string-prefix queries.
 - **Lazy, peer-declared AWS clients.** The AWS SDK clients are lazy-loaded and declared as peer (optional) dependencies, so consumers that never construct a `DynamoDBStorage` are not forced to install them. In TypeScript, `@aws-sdk/client-bedrock-runtime` is needed only for `BedrockEmbedder`.

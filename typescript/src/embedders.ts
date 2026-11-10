@@ -261,3 +261,38 @@ export class BedrockEmbedder implements Embedder {
 export function describeError(error: unknown): string {
   return error instanceof Error ? `${error.name}: ${error.message}` : String(error)
 }
+
+/**
+ * Calls `embedder` as its shape takes text: `embed(text, purpose)` on an object (an SDK
+ * `Embedder`, whose `embed` takes only the text, ignores the purpose), or `embedder(text)`.
+ *
+ * @internal
+ */
+export async function callEmbedder(
+  embedder: Embedder | EmbedFunction,
+  text: string,
+  purpose: EmbeddingPurpose
+): Promise<unknown> {
+  // An object with an embed method is an Embedder even when it is also callable, as in Python.
+  const asEmbedder = embedder as Partial<Embedder>
+  return typeof asEmbedder.embed === 'function'
+    ? await asEmbedder.embed(text, purpose)
+    : await (embedder as EmbedFunction)(text)
+}
+
+/**
+ * `result` as a vector, or `undefined` unless it is a non-empty array of finite numbers.
+ *
+ * @internal
+ */
+export function asVector(result: unknown): number[] | undefined {
+  if (
+    !Array.isArray(result) ||
+    result.length === 0 ||
+    // Array.from turns holes in a sparse array into undefined, which fails the check.
+    !Array.from(result as unknown[]).every((v) => typeof v === 'number' && Number.isFinite(v))
+  ) {
+    return undefined
+  }
+  return result as number[]
+}

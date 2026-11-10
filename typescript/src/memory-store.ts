@@ -6,7 +6,9 @@ import { StorageError } from '@strands-agents/sdk'
 import type { ExtractionConfig, JSONValue, MemoryEntry, MemoryStore, SearchOptions } from '@strands-agents/sdk'
 import { DynamoDBStorage, searchUnderKeyPrefix, storageRegion } from './dynamodb-storage.js'
 import {
+  asVector,
   BedrockEmbedder,
+  callEmbedder,
   describeError,
   type EmbedFunction,
   type Embedder,
@@ -241,32 +243,22 @@ export class DynamoDBMemoryStore implements MemoryStore {
   }
 
   private async _embed(text: string, purpose: EmbeddingPurpose): Promise<number[]> {
-    const embedder = this._embedder
     let result: unknown
     try {
-      // An object with an embed method is an Embedder even when it is also callable, as in Python.
-      const asEmbedder = embedder as Partial<Embedder>
-      result =
-        typeof asEmbedder.embed === 'function'
-          ? await asEmbedder.embed(text, purpose)
-          : await (embedder as EmbedFunction)(text)
+      result = await callEmbedder(this._embedder, text, purpose)
     } catch (error: unknown) {
       if (error instanceof StorageError) throw error
       throw new StorageError(`Embedding failed in memory store '${this.name}': ${describeError(error)}`, {
         cause: error,
       })
     }
-    if (
-      !Array.isArray(result) ||
-      result.length === 0 ||
-      // Array.from turns holes in a sparse array into undefined, which fails the check.
-      !Array.from(result as unknown[]).every((v) => typeof v === 'number' && Number.isFinite(v))
-    ) {
+    const vector = asVector(result)
+    if (!vector) {
       throw new StorageError(
         `The embedder for memory store '${this.name}' must return a non-empty array of finite numbers`
       )
     }
-    return result as number[]
+    return vector
   }
 
   /** Keeps the metadata entries the storage can store; drops the rest with a warning. */
