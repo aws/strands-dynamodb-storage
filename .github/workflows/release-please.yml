@@ -48,7 +48,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          BRANCH: ${{ fromJSON(steps.release.outputs.pr).headBranchName }}
+          # release-please sets pr only when it opens or updates a pull
+          # request. The runner evaluates a step's env before its if
+          # condition, so an unset pr falls back to '{}' for fromJSON.
+          BRANCH: ${{ fromJSON(steps.release.outputs.pr || '{}').headBranchName }}
         run: |
           for workflow in code-scanning.yml ci-python.yml ci-typescript.yml; do
             gh workflow run "$workflow" --ref "$BRANCH"
